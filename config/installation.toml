@@ -1,0 +1,104 @@
+# Neurocinema head-gesture engine: site configuration.
+#
+# Every value here equals the built-in default; edit what you need to tune.
+# Machine-specific overrides (e.g. the headset address) go in config/local.toml,
+# which is loaded after this file and is not committed.
+# Units: degrees, degrees per second (dps), seconds (s), g.
+
+[source]
+kind = "muse"                 # "muse" (headset via LSL) or "sim" (virtual head)
+
+[muse]
+manage_stream = true          # launch and supervise `muselsl stream` ourselves
+address = ""                  # empty = first Muse found. macOS: CoreBluetooth UUID from `muselsl list`
+name = ""                     # e.g. "Muse-41D2"
+backend = "auto"
+stream_eeg = false            # Layer A uses the IMU only
+extra_args = []
+stream_name = "Muse"          # LSL stream name to look for
+source_id = ""                # pin one LSL source if several Muses are around
+startup_grace_s = 45.0        # time allowed to find + connect before retrying
+stale_after_s = 2.0           # no samples this long = stream lost
+resolve_wait_s = 1.0
+backoff_initial_s = 2.0       # retry delays: 2, 4, 8 ... up to backoff_max_s
+backoff_max_s = 60.0
+escalate_after_failures = 5   # then report stream_unrecoverable (and run escalation_command)
+escalation_command = []       # e.g. ["blueutil", "--power", "0"]; argument list, no shell
+pidfile = "run/muselsl.pid"
+
+[imu]
+forward_axis = "x"            # sensor axis pointing out of the forehead: x -x y -y z -z (verify on hardware)
+invert_yaw = false            # flip if turning right shows negative yaw
+invert_pitch = false          # flip if looking up shows negative pitch
+gravity_tau_s = 1.0
+acc_trust_band_g = 0.15
+still_window_s = 0.5
+still_gyro_range_dps = 3.0
+still_acc_range_g = 0.03
+bias_tau_s = 8.0
+bias_update_max_dps = 2.0
+max_bias_dps = 20.0
+freeze_yaw_when_still = true
+
+[calibration]
+still_s = 2.0                 # stillness needed, looking at the centre of the middle screen
+slow_after_s = 15.0           # then send a `calibration_slow` event once
+
+[targets]
+# Placeholder geometry until the room is measured.
+left_yaw_deg = -40.0          # + = visitor's right
+middle_yaw_deg = 0.0
+right_yaw_deg = 40.0
+yaw_hysteresis_deg = 6.0      # dead band around each column boundary
+outer_margin_deg = 30.0       # beyond the outer screens by more than this = no target
+split_pitch_deg = 0.0         # pitch of the top/bottom divider, relative to the calibration gaze
+pitch_hysteresis_deg = 4.0
+max_pitch_deg = 40.0
+
+[gestures.nod]
+enter_dps = 30.0
+exit_dps = 12.0
+peak_dps = 55.0               # lower = softer nods count (and more false positives)
+min_lobes = 2
+max_gap_s = 0.35
+max_lobe_s = 0.6
+dominance = 1.5
+cooldown_s = 0.8
+first_sign = -1               # a nod starts downwards
+
+[gestures.shake]
+enter_dps = 35.0
+exit_dps = 15.0
+peak_dps = 70.0
+min_lobes = 3
+max_gap_s = 0.35
+max_lobe_s = 0.6
+dominance = 1.5
+cooldown_s = 0.8
+first_sign = 0
+
+[interaction]
+min_dwell_s = 0.4             # look at a target this long before a nod selects it
+selected_hold_s = 2.0
+reanchor_gain = 0.5           # on selection, pull yaw halfway to the screen centre
+reset_settle_s = 0.3
+reset_timeout_s = 3.0
+idle_still_s = 20.0           # "not worn": essentially no motion for this long...
+idle_gyro_range_dps = 0.6     # ...meaning gyro range below this (watch `motion` in nc-monitor to tune)
+idle_tilt_deg = 70.0          # or tilted this far from the calibration pose...
+idle_tilt_s = 3.0             # ...for this long
+wake_dps = 30.0               # motion that starts calibration from IDLE
+start_phase = "choosing"      # "choosing" or "watching"
+
+[osc]
+prefix = "/nc"
+destinations = ["127.0.0.1:7000"]   # add "127.0.0.1:7002" to run nc-monitor --port 7002 alongside TD
+listen_host = "127.0.0.1"
+listen_port = 7001
+pose_rate_hz = 30.0
+status_rate_hz = 2.0
+snapshot_rate_hz = 1.0
+
+[logging]
+level = "INFO"
+file = "logs/neurocinema.log"

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neurocinema"
+version = "0.1.0"
+description = "Head-gesture interface for the Neurocinema installation: Muse 2 IMU -> gestures -> OSC (TouchDesigner)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "python-osc>=1.8",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+muse = [
+    "muselsl>=2.5",
+    "pylsl>=1.16",
+]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+nc-engine = "neurocinema.cli:main"
+nc-monitor = "neurocinema.monitor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
