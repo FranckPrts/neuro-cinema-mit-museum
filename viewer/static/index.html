@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neurocinema viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Geist:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* The studio's dark palette (globals.css, data-theme="dark"). Surfaces are
+     tints of the ground rather than bordered boxes; every box has a 4px corner. */
+  :root {
+    color-scheme: dark;
+    --color-void: #14100e;
+    --color-paper: #ece5d8;
+    --color-dim: #8b8377;
+    --color-danger: oklch(70.4% 0.191 22.216);
+    --color-warning: oklch(82.8% 0.189 84.429);
+    --color-success: oklch(76.5% 0.177 163.223);
+    --color-surface: color-mix(in oklab, var(--color-paper) 6%, var(--color-void));
+    --color-surface-hover: color-mix(in oklab, var(--color-paper) 10%, var(--color-void));
+    --font-terminal: "DM Mono", ui-monospace, Menlo, monospace;
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--color-void);
+    color: var(--color-paper); font: 13px/1.5 var(--font-terminal); }
+  canvas { display: block; }
+  #hud { position: absolute; top: 12px; left: 12px; width: 300px; padding: 12px 14px;
+    background: var(--color-surface); border-radius: 4px; }
+  #hud .row { display: flex; justify-content: space-between; gap: 8px; }
+  #hud .k { color: var(--color-dim); }
+  #hud .bar { height: 0.75rem; background: var(--color-surface-hover); border-radius: 4px; margin: 6px 0 10px; overflow: hidden; }
+  #hud .bar div { height: 100%; width: 0; background: var(--color-paper); border-radius: 4px; }
+  #hud a { color: var(--color-paper); text-decoration: underline; text-decoration-color: var(--color-dim);
+    text-underline-offset: 3px; }
+  #hud a:hover { text-decoration-color: var(--color-paper); }
+  #link.bad { color: var(--color-danger); } #link.ok { color: var(--color-success); }
+  /* The `------` rule from globals.css (.term-rule), between HUD sections. */
+  .term-rule { height: 2px; margin: 10px 0 8px; color: var(--color-dim); opacity: 0.5;
+    background-image: repeating-linear-gradient(to right, currentColor 0 10px, transparent 10px 17px); }
+  #log { max-height: 40vh; overflow: hidden; }
+  #log div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log .t { color: var(--color-dim); }
+  #log .err { color: var(--color-danger); }
+  #help { position: absolute; bottom: 12px; left: 14px; color: var(--color-dim); font-size: 12px; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud">
+  <div class="row"><span class="k">engine</span><span id="link" class="bad">waiting for OSC</span></div>
+  <div class="row"><span class="k">state</span><span id="state">-</span></div>
+  <div class="row"><span class="k">phase</span><span id="phase">-</span></div>
+  <div class="row"><span class="k">target</span><span id="target">-</span></div>
+  <div class="row"><span class="k">yaw pitch roll</span><span id="pose">-</span></div>
+  <div class="row"><span class="k" id="barlabel">dwell</span><span id="barval"></span></div>
+  <div class="bar"><div id="bar"></div></div>
+  <div class="term-rule"></div>
+  <div id="log"></div>
+</div>
+<div id="help">drag to orbit · scroll to zoom · v: visitor's view · [ ]: gaze cone size</div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GazeProjection } from "./gaze_projection.js";
+
+const conf = await (await fetch("/config.json")).json();
+const cfg = conf.targets;
+const params = new URLSearchParams(location.search);
+
+// Room geometry, metres, from config/room.toml (ceiling and eye height are
+// unconfirmed guesses). Yaw 0 = calibration gaze = straight across the room.
+// The scene is centred on the room; the visitor is centred on one edge.
+const FT = 0.3048;
+const ROOM_W = conf.room.room.width_m;
+const ROOM_D = conf.room.room.depth_m;
+const CEILING = conf.room.room.ceiling_m;
+const EYE = conf.room.room.eye_height_m;
+const VISITOR = new THREE.Vector3(0, EYE, ROOM_D / 2 - conf.room.room.visitor_inset_m);
+// Studio palette (globals.css, dark). Columns get three muted earth tones so
+// they stay apart; paper is kept for the gaze, the participant's own mark.
+const PAL = { void: 0x14100e, paper: 0xece5d8, dim: 0x8b8377, surface: 0x221d1a, line: 0x2e2723 };
+const COL_COLOR = { left: 0xd09a6a, middle: 0xa89cc8, right: 0x86b39f };
+const D2R = Math.PI / 180;
+
+// --- scene --------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(PAL.void);
+scene.add(new THREE.HemisphereLight(0xfff4e6, 0x2a221d, 2.2));
+
+const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 100);
+camera.position.set(2.5, 4.5, ROOM_D / 2 + 4);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1, 0);
+controls.update();
+let firstPerson = false;
+// Remember the orbit camera so leaving the visitor's view puts it back.
+const orbitPos = new THREE.Vector3();
+function toggleView() {
+  firstPerson = !firstPerson;
+  controls.enabled = !firstPerson;
+  if (firstPerson) orbitPos.copy(camera.position);
+  else { camera.position.copy(orbitPos); controls.update(); }
+}
+addEventListener("keydown", (e) => {
+  if (e.key !== "v" || e.repeat) return;
+  toggleView();
+});
+if (params.get("view") === "visitor") toggleView();
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+resize();
+
+// Room: floor grid (1 ft) and wireframe walls.
+const GRID = Math.max(ROOM_W, ROOM_D);
+const grid = new THREE.GridHelper(GRID, Math.round(GRID / FT), PAL.line, PAL.line);
+scene.add(grid);
+const box = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(ROOM_W, CEILING, ROOM_D)),
+  new THREE.LineBasicMaterial({ color: PAL.dim, transparent: true, opacity: 0.6 }));
+box.position.y = CEILING / 2;
+scene.add(box);
+
+// Where a ray from the visitor's eye leaves the room (walls, floor, ceiling).
+function exitDistance(o, d) {
+  let t = Infinity;
+  for (const [p, v, lo, hi] of [[o.x, d.x, -ROOM_W / 2, ROOM_W / 2], [o.y, d.y, 0, CEILING],
+    [o.z, d.z, -ROOM_D / 2, ROOM_D / 2]]) {
+    if (v > 1e-9) t = Math.min(t, (hi - p) / v);
+    else if (v < -1e-9) t = Math.min(t, (lo - p) / v);
+  }
+  return t;
+}
+// Engine convention: + yaw = visitor's right, + pitch = up.
+function dir(yawDeg, pitchDeg = 0) {
+  const y = yawDeg * D2R, p = pitchDeg * D2R;
+  return new THREE.Vector3(Math.cos(p) * Math.sin(y), Math.sin(p), -Math.cos(p) * Math.cos(y));
+}
+// Horizontal distance from the visitor to the wall at this yaw.
+function wallRange(yawDeg) {
+  const d = dir(yawDeg);
+  return exitDistance(new THREE.Vector3(VISITOR.x, 1, VISITOR.z), d);
+}
+
+// --- target regions, painted on the walls -------------------------------
+// Same rules as TargetTracker: nearest column centre wins, outer screens end
+// outer_margin_deg past their centre; rows split at split_pitch_deg, limited
+// by max_pitch_deg.
+const centres = { left: cfg.left_yaw_deg, middle: cfg.middle_yaw_deg, right: cfg.right_yaw_deg };
+const colRange = {
+  left: [centres.left - cfg.outer_margin_deg, (centres.left + centres.middle) / 2],
+  middle: [(centres.left + centres.middle) / 2, (centres.middle + centres.right) / 2],
+  right: [(centres.middle + centres.right) / 2, centres.right + cfg.outer_margin_deg],
+};
+const rowPitch = {
+  top: [cfg.split_pitch_deg, cfg.split_pitch_deg + cfg.max_pitch_deg],
+  bottom: [cfg.split_pitch_deg - cfg.max_pitch_deg, cfg.split_pitch_deg],
+};
+
+function wallStrip(yaw0, yaw1, pitch0, pitch1) {
+  const pos = [], idx = [], N = 96;
+  for (let i = 0; i <= N; i++) {
+    const yaw = yaw0 + (yaw1 - yaw0) * i / N;
+    const r = wallRange(yaw) * 0.995;  // just in front of the wall
+    const h = dir(yaw);
+    const clampY = (p) => Math.min(CEILING, Math.max(0, EYE + r * Math.tan(p * D2R)));
+    for (const p of [pitch0, pitch1]) {
+      pos.push(VISITOR.x + h.x * r, clampY(p), VISITOR.z + h.z * r);
+    }
+    if (i < N) { const a = 2 * i; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+function label(text, color) {
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 64;
+  const ctx = c.getContext("2d");
+  ctx.font = "500 30px 'DM Mono', ui-monospace, Menlo, monospace";
+  ctx.fillStyle = "#" + color.toString(16).padStart(6, "0");
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(text, 128, 32);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  s.scale.set(1.4, 0.35, 1);
+  return s;
+}
+
+const regions = {};  // "left/top" -> mesh
+for (const [col, [y0, y1]] of Object.entries(colRange)) {
+  for (const [row, [p0, p1]] of Object.entries(rowPitch)) {
+    const mat = new THREE.MeshBasicMaterial({ color: COL_COLOR[col], transparent: true, opacity: 0.12,
+      side: THREE.DoubleSide, depthWrite: false });
+    const mesh = new THREE.Mesh(wallStrip(y0, y1, p0, p1), mat);
+    scene.add(mesh);
+    regions[`${col}/${row}`] = mesh;
+    const mid = (y0 + y1) / 2, r = wallRange(mid) * 0.95, h = dir(mid);
+    const ly = Math.min(CEILING - 0.2, Math.max(0.2, EYE + r * Math.tan(((p0 + p1) / 2) * D2R)));
+    const l = label(`${col} ${row}`, COL_COLOR[col]);
+    l.position.set(VISITOR.x + h.x * r, ly, VISITOR.z + h.z * r);
+    scene.add(l);
+  }
+}
+
+// Boundary rays on the floor: solid at each boundary, faint at the hysteresis edges.
+function floorRay(yaw, color, opacity) {
+  const r = wallRange(yaw), h = dir(yaw);
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(VISITOR.x, 0.01, VISITOR.z),
+    new THREE.Vector3(VISITOR.x + h.x * r, 0.01, VISITOR.z + h.z * r)]);
+  scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity })));
+}
+const hy = cfg.yaw_hysteresis_deg / 2;
+for (const b of [colRange.left[0], colRange.middle[0], colRange.middle[1], colRange.right[1]]) {
+  floorRay(b, PAL.paper, 0.6);
+  floorRay(b - hy, PAL.dim, 0.35);
+  floorRay(b + hy, PAL.dim, 0.35);
+}
+for (const c of Object.values(centres)) floorRay(c, PAL.dim, 0.8);
+
+// --- the visitor's head ---------------------------------------------------
+const head = new THREE.Group();
+head.position.copy(VISITOR);
+head.rotation.order = "YXZ";
+scene.add(head);
+const skinMat = new THREE.MeshStandardMaterial({ color: 0xb8ab98, roughness: 0.85 });
+const skull = new THREE.Mesh(new THREE.SphereGeometry(0.1, 32, 16), skinMat);
+skull.scale.set(0.85, 1.1, 1);
+head.add(skull);
+const nose = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.05, 12), skinMat);
+nose.rotation.x = -Math.PI / 2;
+nose.position.set(0, -0.01, -0.1);
+head.add(nose);
+// Muse 2: a band across the forehead and over the ears.
+const band = new THREE.Mesh(new THREE.TorusGeometry(0.093, 0.008, 8, 48, Math.PI * 1.15),
+  new THREE.MeshStandardMaterial({ color: 0x0b0908, emissive: 0x000000 }));
+band.rotation.set(Math.PI / 2, 0, -Math.PI * 0.075 + Math.PI);
+band.position.y = 0.04;
+head.add(band);
+// Shoulders, so the body's facing is visible from above.
+const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.17, 0.25, 4, 16),
+  new THREE.MeshStandardMaterial({ color: 0x3a322c, roughness: 0.9 }));
+body.scale.set(1.3, 1, 0.6);
+body.position.set(VISITOR.x, EYE - 0.45, VISITOR.z);
+scene.add(body);
+const spot = new THREE.Mesh(new THREE.CircleGeometry(0.25, 32), new THREE.MeshBasicMaterial({ color: PAL.paper, transparent: true, opacity: 0.15 }));
+spot.rotation.x = -Math.PI / 2;
+spot.position.set(VISITOR.x, 0.005, VISITOR.z);
+scene.add(spot);
+
+// Gaze: arrow from the eyes to where the gaze leaves the room.
+const gaze = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), VISITOR, 1, PAL.paper, 0.18, 0.08);
+scene.add(gaze);
+const hit = new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 8), new THREE.MeshBasicMaterial({ color: PAL.paper }));
+scene.add(hit);
+
+// Gaze cone projected onto the screens (see gaze_projection.js). Room-frame
+// origin = floor point under the visitor's eyes.
+const projection = new GazeProjection(scene, conf.room, new THREE.Vector3(VISITOR.x, 0, VISITOR.z), params);
+
+// --- live state -----------------------------------------------------------
+const S = { yaw: 0, pitch: 0, roll: 0, state: "-", target: null, dwell: 0, calibration: 0,
+  lastBeat: 0, lastMsg: 0, selected: null, selectedAt: -1e9, flashAt: -1e9 };
+const $ = (id) => document.getElementById(id);
+
+function logLine(text, cls = "") {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.innerHTML = `<span class="t">${new Date().toLocaleTimeString()}</span> `;
+  d.appendChild(document.createTextNode(text));
+  $("log").prepend(d);
+  while ($("log").children.length > 14) $("log").lastChild.remove();
+}
+
+function onMessage(a, v) {
+  S.lastMsg = performance.now();
+  switch (a) {
+    case "pose": [S.yaw, S.pitch, S.roll] = v.map(Number); break;
+    case "dwell": S.dwell = Number(v[0]); break;
+    case "calibration": S.calibration = Number(v[0]); break;
+    case "heartbeat": S.lastBeat = performance.now(); break;
+    case "state":
+      if (v[0] !== S.state) logLine(`state ${v[0]}`);
+      S.state = v[0]; $("state").textContent = v[0]; break;
+    case "phase": $("phase").textContent = v[0]; break;
+    case "target": {
+      const t = v[0] === "none" || v[1] === "none" ? null : `${v[0]}/${v[1]}`;
+      S.target = t; $("target").textContent = t ?? "none"; break;
+    }
+    case "selected":
+      S.selected = `${v[0]}/${v[1]}`; S.selectedAt = performance.now(); break;
+    case "event":
+      logLine(v.join(" "));
+      if (["confirm", "recenter", "calibrated", "reset"].includes(v[0])) S.flashAt = performance.now();
+      if (v[0] === "selected") { S.selected = `${v[1]}/${v[2]}`; S.selectedAt = performance.now(); }
+      break;
+    case "status/error":
+      if (v[0] !== "ok") logLine(`ERROR ${v.join(" ")}`, "err"); break;
+  }
+}
+
+function connect() {
+  const es = new EventSource("/events");
+  es.onmessage = (e) => { const m = JSON.parse(e.data); onMessage(m.a, m.v); };
+  es.onerror = () => { $("link").textContent = "viewer server down"; $("link").className = "bad"; };
+}
+connect();
+
+// --- render loop ----------------------------------------------------------
+const white = new THREE.Color(PAL.paper);
+function frame() {
+  const now = performance.now();
+  head.rotation.set(S.pitch * D2R, -S.yaw * D2R, -S.roll * D2R);
+
+  const d = dir(S.yaw, S.pitch);
+  const len = exitDistance(VISITOR, d);
+  gaze.setDirection(d);
+  gaze.setLength(len, Math.min(0.25, len * 0.1), 0.08);
+  hit.position.copy(VISITOR).addScaledVector(d, len);
+
+  const sinceSel = (now - S.selectedAt) / 1000;
+  for (const [key, mesh] of Object.entries(regions)) {
+    const col = new THREE.Color(COL_COLOR[key.split("/")[0]]);
+    let op = 0.12;
+    if (key === S.target) op = 0.35 + 0.45 * S.dwell;
+    if (key === S.selected && sinceSel < 2) {
+      const pulse = 0.5 + 0.5 * Math.cos(sinceSel * Math.PI * 4);
+      col.lerp(white, pulse * (1 - sinceSel / 2));
+      op = 0.9;
+    }
+    mesh.material.color.copy(col);
+    mesh.material.opacity = op;
+  }
+  projection.update({ yaw: S.yaw, pitch: S.pitch, time: now / 1000,
+    highlight: S.target ? S.dwell : 0, selected: sinceSel < 2 ? 1 - sinceSel / 2 : 0 });
+  // In the visitor's view the hit sphere would sit on the reticle.
+  hit.visible = gaze.visible = !firstPerson;
+
+  const flash = Math.max(0, 1 - (now - S.flashAt) / 600);
+  band.material.emissive.setRGB(flash * 0.93, flash * 0.9, flash * 0.85);
+
+  // HUD
+  $("pose").textContent = `${S.yaw.toFixed(1)} / ${S.pitch.toFixed(1)} / ${S.roll.toFixed(1)}`;
+  const calibrating = S.state === "calibrating";
+  const val = calibrating ? S.calibration : S.dwell;
+  $("barlabel").textContent = calibrating ? "calibration" : "dwell";
+  $("barval").textContent = `${Math.round(val * 100)}%`;
+  $("bar").style.width = `${val * 100}%`;
+  if (S.lastMsg) {
+    const alive = now - S.lastBeat < 3000;
+    $("link").textContent = alive ? "running" : "no heartbeat (engine down?)";
+    $("link").className = alive ? "ok" : "bad";
+  }
+
+  if (firstPerson) {
+    camera.position.copy(VISITOR).addScaledVector(d, 0.12);
+    camera.lookAt(hit.position);
+  } else {
+    controls.update();
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

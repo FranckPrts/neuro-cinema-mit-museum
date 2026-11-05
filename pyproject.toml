@@ -18,6 +18,7 @@ dependencies = [
 muse = [
     "muselsl>=2.5",
     "pylsl>=1.16",
+    "bitstring<5",  # muselsl 2.5.3 uses Bits(bytes=...), removed in bitstring 5
 ]
 dev = [
     "pytest>=8",

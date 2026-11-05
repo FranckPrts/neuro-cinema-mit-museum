@@ -1,0 +1,21 @@
+# Room and screen geometry, used by the viewer's gaze projection (viewer/room_geometry.py).
+#
+# Kept out of installation.toml because the engine's config loader rejects
+# unknown sections. Every value here equals the built-in default.
+#
+# Room frame: metres, y up, origin on the floor under the visitor's eyes,
+# x = visitor's right, -z = straight ahead (yaw 0, toward the front wall).
+
+[room]
+width_m = 5.0292              # 16.5 ft, side wall to side wall
+depth_m = 5.0292              # 16.5 ft, front wall to back wall
+ceiling_m = 3.048             # 10 ft. UNCONFIRMED, not measured yet
+eye_height_m = 1.6            # UNCONFIRMED, typical standing adult
+visitor_inset_m = 0.6096      # 2 ft in from the back wall, centred left/right
+
+[screens]
+walls = ["front", "left", "right"]   # UNCONFIRMED; back wall assumed bare
+inset_m = 0.0366              # 1.44 in from every wall edge (floor, ceiling, corners)
+
+[gaze]
+cone_deg = 5.0                # half-angle of the projected gaze cone
