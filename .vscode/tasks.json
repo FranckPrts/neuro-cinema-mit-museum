@@ -1,0 +1,98 @@
+{
+  // Run with Cmd+Shift+P > "Tasks: Run Task". Stop with "Tasks: Terminate Task" or Ctrl+C in a panel.
+  // The engine fans out OSC to 7000 (TouchDesigner), 7002 (nc-monitor) and 7003 (viewer):
+  // see [osc] destinations in config/local.toml.
+  "version": "2.0.0",
+  "options": {
+    "env": { "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}" }
+  },
+  "presentation": { "panel": "dedicated", "group": "nc", "clear": true },
+  "tasks": [
+    // ---- Components ----
+    {
+      "label": "Engine: headset",
+      "type": "shell",
+      "command": "nc-engine",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Engine: unmanaged (muselsl/BlueMuse started by you)",
+      "type": "shell",
+      "command": "nc-engine --unmanaged",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Engine: sim (keyboard)",
+      "type": "shell",
+      "command": "nc-engine --sim",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Monitor",
+      "type": "shell",
+      "command": "nc-monitor --port 7002",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Viewer (three.js)",
+      "type": "shell",
+      "command": "python viewer/nc_viewer.py --osc-port 7003",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Muse: stream (EEG + ACC + GYRO)",
+      "type": "shell",
+      "command": "muselsl stream --acc --gyro --lsltime",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Muse: view EEG",
+      "type": "shell",
+      // Give the stream time to connect before looking for it.
+      "command": "sleep 10 && muselsl view",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+
+    // ---- Combinations ----
+    {
+      "label": "Headset + Monitor + Viewer",
+      "dependsOn": ["Engine: headset", "Monitor", "Viewer (three.js)"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Headset + Monitor",
+      "dependsOn": ["Engine: headset", "Monitor"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Muse: list devices",
+      "type": "shell",
+      "command": "muselsl list",
+      "problemMatcher": []
+    },
+    {
+      "label": "Muse: quick scan (stream + view, no engine)",
+      "dependsOn": ["Muse: stream (EEG + ACC + GYRO)", "Muse: view EEG"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Unmanaged engine + Monitor",
+      "dependsOn": ["Engine: unmanaged (muselsl/BlueMuse started by you)", "Monitor"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Tests",
+      "type": "shell",
+      "command": "pytest",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    }
+  ]
+}
