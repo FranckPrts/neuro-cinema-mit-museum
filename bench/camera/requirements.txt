@@ -1,0 +1,6 @@
+# Camera bench only (not needed by nc-engine). Install into the repo's .venv:
+#   pip install -r bench/camera/requirements.txt
+mediapipe>=0.10.20
+opencv-python>=4.9
+numpy>=1.26
+python-osc>=1.8
