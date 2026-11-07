@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neurocinema status</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1d1d1b; --quiet: #6b6a66; --line: #dddbd5;
+    --ok: #1f7a4d; --ok-bg: #e3f3ea; --warn: #9a5b00; --warn-bg: #fdf0d9;
+    --bad: #a8261b; --bad-bg: #fbe3e0; --accent: #2457c5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --card: #20201f; --ink: #f1f0ec; --quiet: #a3a29d; --line: #3a3936;
+      --ok: #5cc98f; --ok-bg: #173526; --warn: #f0b54d; --warn-bg: #3a2c12;
+      --bad: #f2786c; --bad-bg: #3d1a17; --accent: #7aa2ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 17px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+  .banner { border-radius: 14px; padding: 22px 20px; margin-bottom: 18px; border: 2px solid transparent; }
+  .banner h1 { margin: 0; font-size: 28px; line-height: 1.2; }
+  .banner p { margin: 8px 0 0; color: var(--quiet); }
+  .ok   { background: var(--ok-bg);   border-color: var(--ok); }
+  .ok h1 { color: var(--ok); }
+  .swap_soon { background: var(--warn-bg); border-color: var(--warn); }
+  .swap_soon h1 { color: var(--warn); }
+  .offline { background: var(--bad-bg); border-color: var(--bad); }
+  .offline h1 { color: var(--bad); }
+  .action { background: var(--card); border-color: var(--accent); }
+  .action h1 { color: var(--accent); }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--quiet); margin: 26px 0 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 12px; }
+  .hs { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+        container-type: inline-size; }
+  .hs.in-use { border: 2px solid var(--ok); }
+  .hs .top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  /* Letter and printed number share one style; both shrink on narrow (phone) cards instead of wrapping. */
+  .hs .label, .hs .code { font-size: min(34px, 21cqi); font-weight: 700; line-height: 1; white-space: nowrap; }
+  .hs .meta { color: var(--quiet); font-size: 14px; margin: 6px 0 10px; min-height: 40px; }
+  button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
+           color: var(--ink); padding: 10px 14px; cursor: pointer; width: 100%; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row button { width: auto; }
+  .small { color: var(--quiet); font-size: 14px; }
+  code { font-size: 13px; }
+  #conn { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div id="banner" class="banner"><h1 id="headline">Loading…</h1><p id="detail"></p></div>
+  <p id="conn" class="small">Cannot reach the engine. Is the computer on and nc-engine running?</p>
+
+  <h2>Headsets</h2>
+  <div id="headsets" class="grid"></div>
+  <p class="small">To swap: wait until nobody wears the headset, switch the old one off and put it on the charger,
+    switch a charged one on, tap its letter here (check the # matches the number printed on the headset), then pick it up.</p>
+
+  <h2>Tools</h2>
+  <div class="row">
+    <button id="reconnect">Reconnect</button>
+    <button id="release">Stop using headset</button>
+    <button id="sound">Turn on alert sound</button>
+  </div>
+  <div id="unknown"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let soundOn = false, audio = null, lastAlert = "ok", lastBeep = 0, current = null;
+
+function beep() {
+  if (!soundOn || !audio) return;
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.frequency.value = 880; g.gain.value = 0.15;
+  o.connect(g); g.connect(audio.destination);
+  o.start(); o.stop(audio.currentTime + 0.35);
+}
+
+$("sound").onclick = () => {
+  soundOn = !soundOn;
+  if (soundOn && !audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+  $("sound").textContent = soundOn ? "Turn off alert sound" : "Turn on alert sound";
+  if (soundOn) beep();
+};
+
+async function post(path, body) {
+  await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(body || {}) });
+  refresh();
+}
+$("reconnect").onclick = () => post("/api/reconnect");
+$("release").onclick = () => {
+  if (confirm("Stop using the current headset?")) post("/api/release");
+};
+
+function ago(s) {
+  if (s === null || s === undefined) return null;
+  if (s < 90) return `${s} s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  return `${(s / 3600).toFixed(1)} h ago`;
+}
+
+function hwCode(name) {
+  return name.replace(/^Muse-?/i, "");
+}
+
+function render(s) {
+  const busy = s.phase === "connecting" || s.phase === "confirming";
+  $("banner").className = "banner " + (busy && s.alert !== "offline" ? "action" : s.alert);
+  $("headline").textContent = busy ? s.message : s.headline;
+  $("detail").textContent = busy || s.headline === s.message ? "" : s.message;
+
+  current = s.current;
+  const box = $("headsets");
+  box.replaceChildren(...s.headsets.map((h) => {
+    const card = document.createElement("div");
+    card.className = "hs" + (h.in_use ? " in-use" : "");
+    const meta = [];
+    if (h.in_use) meta.push("In use");
+    else if (h.chosen) meta.push("Chosen");
+    if (h.battery !== null) meta.push(`${h.battery} %` + (h.in_use ? "" : ` (${ago(h.battery_s_ago)})`));
+    if (h.minutes_left !== null && h.in_use) meta.push(`about ${h.minutes_left} min left`);
+    if (!h.chosen && h.seen_s_ago !== null) meta.push(h.seen_s_ago < 30 ? "switched on" : `seen ${ago(h.seen_s_ago)}`);
+    card.innerHTML = `<div class="top"><div class="label"></div><div class="code"></div></div><div class="meta"></div>`;
+    card.querySelector(".label").textContent = h.label;
+    // The number printed on the headset: the end of its Bluetooth name (Muse-1E58 -> 1E58).
+    card.querySelector(".code").textContent = "#" + hwCode(h.name);
+    card.querySelector(".code").title = h.name;
+    card.querySelector(".meta").textContent = meta.join(" · ") || "Not seen yet";
+    const b = document.createElement("button");
+    b.textContent = h.chosen ? (h.in_use ? "In use" : "Waiting…") : "Use this headset";
+    b.className = h.chosen ? "" : "primary";
+    b.disabled = h.chosen;
+    b.onclick = () => {
+      if (!current || confirm(`Switch from headset ${current} to ${h.label} (#${hwCode(h.name)})? Only do this between visitors.`))
+        post("/api/select", { label: h.label });
+    };
+    card.appendChild(b);
+    return card;
+  }));
+
+  const unk = $("unknown");
+  unk.innerHTML = "";
+  if (s.unknown.length) {
+    const p = document.createElement("p");
+    p.className = "small";
+    p.textContent = "Other Muse headsets nearby (not registered, never used): " + s.unknown.join(", ") +
+      ". To add one, put e.g. \"E=" + s.unknown[0] + "\" in headsets.registry in config/local.toml.";
+    unk.appendChild(p);
+  }
+
+  if (s.alert !== "ok" && (s.alert !== lastAlert || Date.now() - lastBeep > 300000)) {
+    beep(); lastBeep = Date.now();
+  }
+  lastAlert = s.alert;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/status", { cache: "no-store" });
+    render(await r.json());
+    $("conn").style.display = "none";
+  } catch (e) {
+    $("conn").style.display = "block";
+    $("banner").className = "banner offline";
+    $("headline").textContent = "Status page lost contact with the engine";
+  }
+}
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>
