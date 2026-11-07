@@ -108,6 +108,24 @@ class App:
                     self.supervisor.state.value,
                     self.supervisor.failures,
                 )
+            snapshot = getattr(self.source, "snapshot", None)
+            if snapshot is not None:  # headset manager (muse_direct)
+                self._emit_headset(snapshot())
+
+    def _emit_headset(self, snap: dict) -> None:
+        """/nc/headset label battery minutes_left phase alert (-1 = unknown)."""
+        label = snap.get("current") or ""
+        h = next((h for h in snap.get("headsets", []) if h["label"] == label), None)
+        battery = h["battery"] if h and h["battery"] is not None else -1
+        left = h["minutes_left"] if h and h["minutes_left"] is not None else -1
+        self.out.send(
+            f"{self.p}/headset",
+            label,
+            float(battery),
+            float(left),
+            snap.get("phase", ""),
+            snap.get("alert", ""),
+        )
 
     def on_stream_error(self, code: str, message: str) -> None:
         if code == "ok":

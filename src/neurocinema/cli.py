@@ -38,6 +38,35 @@ def setup_logging(cfg: Config, level_override: str | None) -> None:
             log.warning("cannot write log file %s: %s", path, e)
 
 
+# Starting battery of the simulated headsets (--sim-headsets). A starts low so
+# the "swap soon" state shows up within a few minutes.
+SIM_BATTERY = {"A": 22.0, "B": 96.0, "C": 71.0, "D": 100.0}
+
+
+def make_headset_manager(cfg: Config, simulated: bool):
+    from .ble import BleWorker
+    from .headsets import HeadsetManager
+
+    if simulated:
+        from .ble import FakeDriver
+
+        driver = FakeDriver({f"Muse-SIM{label}": pct for label, pct in SIM_BATTERY.items()})
+    else:
+        if not cfg.headsets.registry:
+            log.error("source.kind = 'muse_direct' needs headsets.registry, e.g. "
+                      "registry = [\"A=Muse-41D2\"] in config/local.toml (names from `muselsl list`)")
+            return None
+        try:
+            from .ble import MuselslDriver
+
+            driver = MuselslDriver()
+        except ImportError as e:
+            log.error("headset support is not installed (%s); run: pip install -e '.[muse]'", e)
+            return None
+    log.info("headsets: %s", ", ".join(cfg.headsets.registry))
+    return HeadsetManager(cfg.headsets, BleWorker(driver))
+
+
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="nc-engine", description=__doc__)
     p.add_argument("-c", "--config", type=Path, action="append",
@@ -46,6 +75,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--no-keyboard", action="store_true", help="simulator without keyboard control")
     p.add_argument("--unmanaged", action="store_true",
                    help="do not launch muselsl; read LSL streams published by something else")
+    p.add_argument("--sim-headsets", action="store_true",
+                   help="in-process headset manager with four simulated headsets (try the status page)")
     p.add_argument("--log-level", help="DEBUG, INFO, WARNING ...")
     return p.parse_args(argv)
 
@@ -62,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         cfg.source.kind = "sim"
     if args.unmanaged:
         cfg.muse.manage_stream = False
+    if args.sim_headsets:
+        cfg.source.kind = "muse_direct"
+        cfg.headsets.registry = [f"{label}=Muse-SIM{label}" for label in SIM_BATTERY]
     setup_logging(cfg, args.log_level)
     log.info("config: %s", ", ".join(map(str, paths)) or "built-in defaults")
 
@@ -79,6 +113,21 @@ def main(argv: list[str] | None = None) -> int:
         from .sources.sim import SimSource
 
         source = SimSource()
+    elif cfg.source.kind == "muse_direct":
+        source = make_headset_manager(cfg, simulated=args.sim_headsets)
+        if source is None:
+            return 4
+        if cfg.status_page.enabled:
+            from .statuspage import StatusPage
+
+            try:
+                page = StatusPage(source, cfg.status_page.host, cfg.status_page.port)
+            except OSError as e:
+                log.error("cannot serve the status page on %s:%d (%s)",
+                          cfg.status_page.host, cfg.status_page.port, e)
+                return 3
+            page.start()
+            closers.append(page.close)
     else:
         try:
             from .sources.lsl import LslImuSource

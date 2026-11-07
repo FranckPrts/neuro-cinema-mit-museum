@@ -6,7 +6,7 @@
 # Units: degrees, degrees per second (dps), seconds (s), g.
 
 [source]
-kind = "muse"                 # "muse" (headset via LSL) or "sim" (virtual head)
+kind = "muse"                 # "muse" (headset via LSL), "sim" (virtual head) or "muse_direct" (in-process, battery + headset swaps)
 
 [muse]
 manage_stream = true          # launch and supervise `muselsl stream` ourselves
@@ -25,6 +25,26 @@ backoff_max_s = 60.0
 escalate_after_failures = 5   # then report stream_unrecoverable (and run escalation_command)
 escalation_command = []       # e.g. ["blueutil", "--power", "0"]; argument list, no shell
 pidfile = "run/muselsl.pid"
+
+[headsets]
+# Only used with source.kind = "muse_direct". Proof of concept.
+registry = []                 # "LABEL=BLE name", e.g. ["A=Muse-41D2", "B=Muse-0C3A"]; label = sticker
+scan_interval_s = 10.0        # look for headsets this often while none is in use
+scan_timeout_s = 5.0
+connect_attempts = 3
+confirm_dps = 40.0            # a chosen headset is used once lifted (gyro above this)...
+confirm_timeout_s = 120.0     # ...within this time, otherwise it is released
+stale_after_s = 2.0           # in use: no samples this long = lost
+reconnect_interval_s = 5.0    # then retry the same headset this often
+offline_after_s = 60.0        # status "offline" after this long without a headset in use
+swap_soon_percent = 20.0      # status "swap soon" below this battery level...
+swap_soon_minutes = 30.0      # ...or this estimated time left
+auto_adopt_after_s = 0.0      # fallback: use the only registered headset in range after this long; 0 = off
+
+[status_page]
+enabled = true
+host = "127.0.0.1"            # "0.0.0.0" to reach it from a tablet on the same network
+port = 8081                   # 8080 is the 3D viewer (viewer/nc_viewer.py)
 
 [imu]
 forward_axis = "x"            # sensor axis pointing out of the forehead: x -x y -y z -z (verify on hardware)

@@ -31,5 +31,8 @@ nc-monitor = "neurocinema.monitor:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+neurocinema = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

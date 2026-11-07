@@ -28,6 +28,7 @@
   #hud { position: absolute; top: 12px; left: 12px; width: 300px; padding: 12px 14px;
     background: var(--color-surface); border-radius: 4px; }
   #hud .row { display: flex; justify-content: space-between; gap: 8px; }
+  #hud .row[hidden] { display: none; }
   #hud .k { color: var(--color-dim); }
   #hud .bar { height: 0.75rem; background: var(--color-surface-hover); border-radius: 4px; margin: 6px 0 10px; overflow: hidden; }
   #hud .bar div { height: 100%; width: 0; background: var(--color-paper); border-radius: 4px; }
@@ -35,6 +36,7 @@
     text-underline-offset: 3px; }
   #hud a:hover { text-decoration-color: var(--color-paper); }
   #link.bad { color: var(--color-danger); } #link.ok { color: var(--color-success); }
+  #headset.bad { color: var(--color-danger); } #headset.warn { color: var(--color-warning); }
   /* The `------` rule from globals.css (.term-rule), between HUD sections. */
   .term-rule { height: 2px; margin: 10px 0 8px; color: var(--color-dim); opacity: 0.5;
     background-image: repeating-linear-gradient(to right, currentColor 0 10px, transparent 10px 17px); }
@@ -54,6 +56,7 @@
 <body>
 <div id="hud">
   <div class="row"><span class="k">engine</span><span id="link" class="bad">waiting for OSC</span></div>
+  <div class="row" id="headsetrow" hidden><span class="k">headset</span><span id="headset">-</span></div>
   <div class="row"><span class="k">state</span><span id="state">-</span></div>
   <div class="row"><span class="k">phase</span><span id="phase">-</span></div>
   <div class="row"><span class="k">target</span><span id="target">-</span></div>
@@ -275,7 +278,7 @@ const projection = new GazeProjection(scene, conf.room, new THREE.Vector3(VISITO
 
 // --- live state -----------------------------------------------------------
 const S = { yaw: 0, pitch: 0, roll: 0, state: "-", target: null, dwell: 0, calibration: 0,
-  lastBeat: 0, lastMsg: 0, selected: null, selectedAt: -1e9, flashAt: -1e9 };
+  lastBeat: 0, lastMsg: 0, selected: null, selectedAt: -1e9, flashAt: -1e9, lastHeadset: -1e9 };
 const $ = (id) => document.getElementById(id);
 
 function logLine(text, cls = "") {
@@ -311,6 +314,17 @@ function onMessage(a, v) {
       break;
     case "status/error":
       if (v[0] !== "ok") logLine(`ERROR ${v.join(" ")}`, "err"); break;
+    case "headset": {
+      // label, battery %, minutes left (-1 = unknown), phase, alert (muse_direct only)
+      const [label, battery, left, phase, alert] = [v[0], Number(v[1]), Number(v[2]), v[3], v[4]];
+      const parts = [label || "none"];
+      if (phase !== "active") parts.push(phase.replace("_", " "));
+      if (battery >= 0) parts.push(`${Math.round(battery)} %`);
+      if (left >= 0) parts.push(left < 60 ? `~${Math.round(left)} min left` : `~${(left / 60).toFixed(1)} h left`);
+      $("headset").textContent = parts.join(" · ");
+      $("headset").className = alert === "offline" ? "bad" : alert === "swap_soon" ? "warn" : "";
+      S.lastHeadset = performance.now(); break;
+    }
   }
 }
 
@@ -366,6 +380,8 @@ function frame() {
     $("link").textContent = alive ? "running" : "no heartbeat (engine down?)";
     $("link").className = alive ? "ok" : "bad";
   }
+  // Only the in-process headset manager sends /headset; hide the row otherwise.
+  $("headsetrow").hidden = now - S.lastHeadset > 3000;
 
   if (firstPerson) {
     camera.position.copy(VISITOR).addScaledVector(d, 0.12);

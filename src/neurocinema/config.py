@@ -21,7 +21,8 @@ class ConfigError(ValueError):
 
 @dataclass
 class SourceConfig:
-    # "muse" reads the headset through LSL; "sim" runs a virtual head (no hardware).
+    # "muse" reads the headset through LSL; "sim" runs a virtual head (no hardware);
+    # "muse_direct" connects to the headset in-process (battery, staff headset swaps).
     kind: str = "muse"
 
 
@@ -52,6 +53,57 @@ class MuseConfig:
     # failures, e.g. to restart Bluetooth. Argument list, no shell.
     escalation_command: list[str] = field(default_factory=list)
     pidfile: str = "run/muselsl.pid"
+
+
+@dataclass
+class HeadsetsConfig:
+    """In-process headset connection (source.kind = "muse_direct")."""
+
+    # Registered headsets, "LABEL=BLE name", e.g. ["A=Muse-41D2", "B=Muse-0C3A"].
+    # The label is the sticker on the headset. Only these are ever connected.
+    registry: list[str] = field(default_factory=list)
+    # Looking for headsets while none is in use.
+    scan_interval_s: float = 10.0
+    scan_timeout_s: float = 5.0
+    connect_attempts: int = 3
+    # After staff choose a headset, it is used only once it moves (they lift it):
+    # gyro above this, within the timeout.
+    confirm_dps: float = 40.0
+    confirm_timeout_s: float = 120.0
+    # In use: no samples this long = lost; then retry the same headset this often.
+    stale_after_s: float = 2.0
+    reconnect_interval_s: float = 5.0
+    # Status: "offline" after this long without a headset in use; "swap soon"
+    # below this battery level or estimated time left.
+    offline_after_s: float = 60.0
+    swap_soon_percent: float = 20.0
+    swap_soon_minutes: float = 30.0
+    # Fallback when nobody confirms: after this long with no headset, use the
+    # only registered headset in range without confirmation. 0 = off.
+    auto_adopt_after_s: float = 0.0
+
+    def entries(self) -> list[tuple[str, str]]:
+        """(label, BLE name) pairs; raises ConfigError if malformed."""
+        out = []
+        for item in self.registry:
+            label, sep, name = (part.strip() for part in item.partition("="))
+            if not sep or not label or not name:
+                raise ConfigError(f"headsets.registry: expected 'LABEL=Muse-XXXX', got {item!r}")
+            out.append((label, name))
+        labels = [label for label, _ in out]
+        names = [name for _, name in out]
+        if len(set(labels)) != len(labels) or len(set(names)) != len(names):
+            raise ConfigError("headsets.registry: labels and names must be unique")
+        return out
+
+
+@dataclass
+class StatusPageConfig:
+    # Local web page for staff (muse_direct only). host "0.0.0.0" makes it
+    # reachable from a tablet on the same network.
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8081  # 8080 is the 3D viewer
 
 
 @dataclass
@@ -181,6 +233,8 @@ class LoggingConfig:
 class Config:
     source: SourceConfig = field(default_factory=SourceConfig)
     muse: MuseConfig = field(default_factory=MuseConfig)
+    headsets: HeadsetsConfig = field(default_factory=HeadsetsConfig)
+    status_page: StatusPageConfig = field(default_factory=StatusPageConfig)
     imu: ImuConfig = field(default_factory=ImuConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     targets: TargetsConfig = field(default_factory=TargetsConfig)
@@ -190,8 +244,12 @@ class Config:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def validate(self) -> None:
-        if self.source.kind not in ("muse", "sim"):
-            raise ConfigError(f"source.kind must be 'muse' or 'sim', got {self.source.kind!r}")
+        if self.source.kind not in ("muse", "sim", "muse_direct"):
+            raise ConfigError(
+                f"source.kind must be 'muse', 'sim' or 'muse_direct', got {self.source.kind!r}")
+        self.headsets.entries()
+        if self.headsets.connect_attempts < 1:
+            raise ConfigError("headsets.connect_attempts must be at least 1")
         if self.imu.forward_axis not in AXIS_NAMES:
             raise ConfigError(f"imu.forward_axis must be one of {AXIS_NAMES}")
         t = self.targets

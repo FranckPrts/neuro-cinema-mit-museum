@@ -90,6 +90,44 @@ and run `nc-monitor --port 7002`.
 5. Tune gestures with real visitors (see the checklist below). The
    `nod_ignored` events and the `motion` value in `nc-monitor` help.
 
+## Headset manager and status page (proof of concept)
+
+`source.kind = "muse_direct"` connects to the headset inside the engine
+(muselsl's `Muse` class, no `muselsl stream`, no LSL), so the engine can read
+the battery and switch headsets without a restart. Staff use a local web page.
+
+**Try it without hardware** (four simulated headsets, A starts at 22 %):
+
+```bash
+nc-engine --sim-headsets
+# open http://127.0.0.1:8081, tap "Use headset B"; the fake headset is "lifted" after 3 s
+```
+
+**With real headsets**, in `config/local.toml`:
+
+```toml
+[source]
+kind = "muse_direct"
+
+[headsets]
+registry = ["A=Muse-41D2", "B=Muse-0C3A", "C=Muse-....", "D=Muse-...."]  # names from `muselsl list`
+
+[status_page]
+host = "0.0.0.0"   # reach it from a tablet on the same network
+```
+
+Swap: switch the old headset off, switch a charged one on, tap its letter on
+the page, pick it up. The engine only uses a headset once it sees it move, so
+the wrong one is never locked in, and headsets outside `registry` are never
+connected. Status has three states: all good, swap soon (under 20 % or 30 min
+left), offline (no headset in use for 60 s). Settings are in `[headsets]`.
+
+Not verified on hardware yet: muselsl's battery reading (raw / 512) against
+the Muse app, how often the Muse sends battery telemetry (the engine asks once
+after 60 s if none arrived), and bleak running on a background thread on macOS.
+The existing `muse` source (supervised `muselsl stream`) is unchanged and stays
+the default.
+
 ## Interaction
 
 | State | Meaning | Leaves when |
@@ -119,6 +157,7 @@ Engine → TouchDesigner (default `127.0.0.1:7000`):
 | `/nc/status` | connected (0/1), packet_age_ms (int, -1 = never), rate_hz (float), motion_dps (float, -1 = unknown) | 2 Hz |
 | `/nc/status/stream` | state (`stopped` `starting` `streaming` `backoff`), consecutive_failures (int) | 2 Hz, headset mode |
 | `/nc/status/error` | code (`stream_unrecoverable` / `ok`), message | after repeated stream failures; `ok` once recovered |
+| `/nc/headset` | label (string, `""` = none), battery_percent (float, -1 = unknown), minutes_left (float, -1 = unknown), phase (`no_headset` `connecting` `confirming` `active` `reconnecting`), alert (`ok` `swap_soon` `offline`) | 2 Hz, `muse_direct` only |
 | `/nc/state` | `disconnected` `idle` `calibrating` `active` `selected` `resetting` | on change, and every second |
 | `/nc/phase` | `choosing` / `watching` | on change, and every second |
 | `/nc/target` | column (`left` `middle` `right` `none`), row (`top` `bottom` `none`) | on change, and every second |
@@ -183,6 +222,8 @@ ever written to disk.
 | `src/neurocinema/app.py` | main loop, status, commands |
 | `src/neurocinema/supervisor.py`, `musestream.py` | running and restarting muselsl |
 | `src/neurocinema/sources/` | LSL (headset) and simulator inputs |
+| `src/neurocinema/ble.py`, `headsets.py` | in-process headset link, registry, swaps, battery (`muse_direct`) |
+| `src/neurocinema/statuspage.py`, `static/status.html` | local status page for staff |
 | `src/neurocinema/sim/` | virtual head and keyboard control |
 | `config/installation.toml` | every setting, documented (mirrors the code defaults) |
 
@@ -190,5 +231,5 @@ ever written to disk.
 
 - A4: live-reloading the config while running; a live debug plot.
 - A5: OS integration (auto-start, supervisor service, nightly reboot).
-- Swapping headsets without a restart.
+- Swapping headsets without a restart: proof of concept (`muse_direct`), not yet tested on hardware.
 - Layer C: live EEG during `watching`.

@@ -1,0 +1,1565 @@
+diff --git a/README.md b/README.md
+index 3424c3b..3d2d999 100644
+--- a/README.md
++++ b/README.md
+@@ -90,6 +90,44 @@ and run `nc-monitor --port 7002`.
+ 5. Tune gestures with real visitors (see the checklist below). The
+    `nod_ignored` events and the `motion` value in `nc-monitor` help.
+ 
++## Headset manager and status page (proof of concept)
++
++`source.kind = "muse_direct"` connects to the headset inside the engine
++(muselsl's `Muse` class, no `muselsl stream`, no LSL), so the engine can read
++the battery and switch headsets without a restart. Staff use a local web page.
++
++**Try it without hardware** (four simulated headsets, A starts at 22 %):
++
++```bash
++nc-engine --sim-headsets
++# open http://127.0.0.1:8080, tap "Use headset B"; the fake headset is "lifted" after 3 s
++```
++
++**With real headsets**, in `config/local.toml`:
++
++```toml
++[source]
++kind = "muse_direct"
++
++[headsets]
++registry = ["A=Muse-41D2", "B=Muse-0C3A", "C=Muse-....", "D=Muse-...."]  # names from `muselsl list`
++
++[status_page]
++host = "0.0.0.0"   # reach it from a tablet on the same network
++```
++
++Swap: switch the old headset off, switch a charged one on, tap its letter on
++the page, pick it up. The engine only uses a headset once it sees it move, so
++the wrong one is never locked in, and headsets outside `registry` are never
++connected. Status has three states: all good, swap soon (under 20 % or 30 min
++left), offline (no headset in use for 60 s). Settings are in `[headsets]`.
++
++Not verified on hardware yet: muselsl's battery reading (raw / 512) against
++the Muse app, how often the Muse sends battery telemetry (the engine asks once
++after 60 s if none arrived), and bleak running on a background thread on macOS.
++The existing `muse` source (supervised `muselsl stream`) is unchanged and stays
++the default.
++
+ ## Interaction
+ 
+ | State | Meaning | Leaves when |
+@@ -183,6 +221,8 @@ ever written to disk.
+ | `src/neurocinema/app.py` | main loop, status, commands |
+ | `src/neurocinema/supervisor.py`, `musestream.py` | running and restarting muselsl |
+ | `src/neurocinema/sources/` | LSL (headset) and simulator inputs |
++| `src/neurocinema/ble.py`, `headsets.py` | in-process headset link, registry, swaps, battery (`muse_direct`) |
++| `src/neurocinema/statuspage.py`, `static/status.html` | local status page for staff |
+ | `src/neurocinema/sim/` | virtual head and keyboard control |
+ | `config/installation.toml` | every setting, documented (mirrors the code defaults) |
+ 
+@@ -190,5 +230,5 @@ ever written to disk.
+ 
+ - A4: live-reloading the config while running; a live debug plot.
+ - A5: OS integration (auto-start, supervisor service, nightly reboot).
+-- Swapping headsets without a restart.
++- Swapping headsets without a restart: proof of concept (`muse_direct`), not yet tested on hardware.
+ - Layer C: live EEG during `watching`.
+diff --git a/config/installation.toml b/config/installation.toml
+index c7acc62..031405f 100644
+--- a/config/installation.toml
++++ b/config/installation.toml
+@@ -6,7 +6,7 @@
+ # Units: degrees, degrees per second (dps), seconds (s), g.
+ 
+ [source]
+-kind = "muse"                 # "muse" (headset via LSL) or "sim" (virtual head)
++kind = "muse"                 # "muse" (headset via LSL), "sim" (virtual head) or "muse_direct" (in-process, battery + headset swaps)
+ 
+ [muse]
+ manage_stream = true          # launch and supervise `muselsl stream` ourselves
+@@ -26,6 +26,26 @@ escalate_after_failures = 5   # then report stream_unrecoverable (and run escala
+ escalation_command = []       # e.g. ["blueutil", "--power", "0"]; argument list, no shell
+ pidfile = "run/muselsl.pid"
+ 
++[headsets]
++# Only used with source.kind = "muse_direct". Proof of concept.
++registry = []                 # "LABEL=BLE name", e.g. ["A=Muse-41D2", "B=Muse-0C3A"]; label = sticker
++scan_interval_s = 10.0        # look for headsets this often while none is in use
++scan_timeout_s = 5.0
++connect_attempts = 3
++confirm_dps = 40.0            # a chosen headset is used once lifted (gyro above this)...
++confirm_timeout_s = 120.0     # ...within this time, otherwise it is released
++stale_after_s = 2.0           # in use: no samples this long = lost
++reconnect_interval_s = 5.0    # then retry the same headset this often
++offline_after_s = 60.0        # status "offline" after this long without a headset in use
++swap_soon_percent = 20.0      # status "swap soon" below this battery level...
++swap_soon_minutes = 30.0      # ...or this estimated time left
++auto_adopt_after_s = 0.0      # fallback: use the only registered headset in range after this long; 0 = off
++
++[status_page]
++enabled = true
++host = "127.0.0.1"            # "0.0.0.0" to reach it from a tablet on the same network
++port = 8080
++
+ [imu]
+ forward_axis = "x"            # sensor axis pointing out of the forehead: x -x y -y z -z (verify on hardware)
+ invert_yaw = false            # flip if turning right shows negative yaw
+diff --git a/pyproject.toml b/pyproject.toml
+index c139514..d649d11 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -31,5 +31,8 @@ nc-monitor = "neurocinema.monitor:main"
+ [tool.setuptools.packages.find]
+ where = ["src"]
+ 
++[tool.setuptools.package-data]
++neurocinema = ["static/*.html"]
++
+ [tool.pytest.ini_options]
+ testpaths = ["tests"]
+diff --git a/b/src/neurocinema/ble.py b/src/neurocinema/ble.py
+new file mode 100644
+index 0000000..aac0215
+--- /dev/null
++++ b/src/neurocinema/ble.py
+@@ -0,0 +1,398 @@
++"""The Bluetooth side of the in-process headset connection.
++
++One background thread (`BleWorker`) owns the Bluetooth link. It only does what
++it is told (scan, connect, disconnect) and reports back through queues; every
++decision is made by `headsets.HeadsetManager` on the main loop.
++
++The real link goes through muselsl's `Muse` class (bleak underneath), without
++`muselsl stream` and without LSL. `FakeDriver` stands in for it in tests and in
++`nc-engine --sim-headsets`.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import queue
++import threading
++import time
++from collections import deque
++from collections.abc import Callable
++from dataclasses import dataclass
++from typing import Protocol
++
++log = logging.getLogger(__name__)
++
++IMU_RATE_HZ = 52.0
++
++# Callbacks a driver calls from inside connect()/pump().
++OnImu = Callable[[str, float, float, float, float], None]  # kind, t, x, y, z
++OnBattery = Callable[[float, float], None]  # percent, t
++
++
++class ConnectError(RuntimeError):
++    pass
++
++
++@dataclass(frozen=True)
++class Seen:
++    """A Muse found by a scan."""
++
++    name: str
++    address: str
++
++
++class BleDriver(Protocol):
++    def scan(self, timeout_s: float) -> list[Seen]:
++        """Muses currently advertising (i.e. switched on and not connected)."""
++
++    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery) -> None:
++        """Connect and start streaming ACC + GYRO. Raises ConnectError."""
++
++    def pump(self, seconds: float) -> None:
++        """Let the Bluetooth stack deliver data for this long (callbacks run here)."""
++
++    def disconnect(self) -> None: ...
++
++
++# --- worker ---------------------------------------------------------------------
++
++
++@dataclass(frozen=True)
++class ImuReading:
++    label: str
++    kind: str
++    t: float
++    x: float
++    y: float
++    z: float
++
++
++class BleWorker:
++    """Runs a driver on its own thread. Thread-safe API for the main loop.
++
++    Events (drained with `events()`), as tuples:
++      ("scan", [Seen, ...])
++      ("connected", label)
++      ("connect_failed", label, message)
++      ("disconnected", label)
++      ("battery", label, percent, t)
++    """
++
++    def __init__(self, driver: BleDriver, start_thread: bool = True):
++        self.driver = driver
++        self._commands: queue.Queue[tuple] = queue.Queue()
++        self._events: queue.Queue[tuple] = queue.Queue()
++        self._readings: deque[ImuReading] = deque(maxlen=5000)
++        self._label: str | None = None  # connected headset
++        self._busy = threading.Event()
++        self._stop = threading.Event()
++        self._thread: threading.Thread | None = None
++        if start_thread:
++            self._thread = threading.Thread(target=self._run, name="ble-worker", daemon=True)
++            self._thread.start()
++
++    # --- main-loop API ---------------------------------------------------------------
++
++    def request_scan(self, timeout_s: float) -> None:
++        self._busy.set()
++        self._commands.put(("scan", timeout_s))
++
++    def request_connect(self, label: str, name: str, address: str | None) -> None:
++        self._busy.set()
++        self._commands.put(("connect", label, name, address))
++
++    def request_disconnect(self) -> None:
++        self._commands.put(("disconnect",))
++
++    @property
++    def busy(self) -> bool:
++        """A scan or connect is queued or running."""
++        return self._busy.is_set()
++
++    def events(self) -> list[tuple]:
++        out = []
++        while True:
++            try:
++                out.append(self._events.get_nowait())
++            except queue.Empty:
++                return out
++
++    def readings(self) -> list[ImuReading]:
++        out = []
++        while self._readings:
++            out.append(self._readings.popleft())
++        return out
++
++    def close(self) -> None:
++        self._stop.set()
++        self._commands.put(("stop",))
++        if self._thread is not None:
++            self._thread.join(timeout=5.0)
++        else:
++            self._drop()
++
++    # --- worker thread -----------------------------------------------------------------
++
++    def _run(self) -> None:
++        while not self._stop.is_set():
++            self.step(wait_s=0.0 if self._label else 0.05)
++        self._drop()
++
++    def step(self, wait_s: float = 0.0) -> None:
++        """One command, or one pump of the link. Called by the thread (or by tests)."""
++        try:
++            cmd = self._commands.get(timeout=wait_s) if wait_s > 0 else self._commands.get_nowait()
++        except queue.Empty:
++            cmd = None
++        if cmd is not None:
++            try:
++                self._handle(cmd)
++            except Exception:  # noqa: BLE001 - the worker must never die
++                log.exception("Bluetooth command %s failed", cmd[0])
++            finally:
++                if self._commands.empty():
++                    self._busy.clear()
++            return
++        if self._label is not None:
++            try:
++                self.driver.pump(0.05)
++            except Exception:  # noqa: BLE001
++                log.exception("Bluetooth link to headset %s failed", self._label)
++                self._drop()
++
++    def _handle(self, cmd: tuple) -> None:
++        kind = cmd[0]
++        if kind == "stop":
++            return
++        if kind == "scan":
++            if self._label is not None:
++                return  # never scan while streaming
++            self._events.put(("scan", self.driver.scan(cmd[1])))
++        elif kind == "connect":
++            _, label, name, address = cmd
++            self._drop()
++            if not address:
++                found = [s for s in self.driver.scan(5.0) if s.name == name]
++                if not found:
++                    self._events.put(("connect_failed", label, f"{name} not found; is it switched on?"))
++                    return
++                address = found[0].address
++            try:
++                self.driver.connect(address, name, self._imu_cb(label), self._battery_cb(label))
++            except Exception as e:  # noqa: BLE001
++                log.warning("could not connect to headset %s (%s): %s", label, name, e)
++                self._events.put(("connect_failed", label, str(e) or type(e).__name__))
++                return
++            self._label = label
++            self._events.put(("connected", label))
++        elif kind == "disconnect":
++            self._drop()
++
++    def _drop(self) -> None:
++        if self._label is None:
++            return
++        label, self._label = self._label, None
++        try:
++            self.driver.disconnect()
++        except Exception:  # noqa: BLE001 - the link may already be gone
++            log.debug("disconnect from %s failed", label, exc_info=True)
++        self._events.put(("disconnected", label))
++
++    def _imu_cb(self, label: str) -> OnImu:
++        def cb(kind: str, t: float, x: float, y: float, z: float) -> None:
++            self._readings.append(ImuReading(label, kind, t, x, y, z))
++        return cb
++
++    def _battery_cb(self, label: str) -> OnBattery:
++        def cb(percent: float, t: float) -> None:
++            self._events.put(("battery", label, percent, t))
++        return cb
++
++
++# --- real headset ------------------------------------------------------------------------
++
++
++class MuselslDriver:
++    """Muse 2 through muselsl's `Muse` class and its bleak backend.
++
++    All calls happen on the worker thread, which also runs muselsl's asyncio
++    loop (in `pump`), so Bluetooth callbacks arrive on that thread.
++    """
++
++    # Battery normally arrives as telemetry. If none has come this long after
++    # connecting, ask the headset for its status once (it reports "bp").
++    ASK_STATUS_AFTER_S = 60.0
++
++    def __init__(self, clock: Callable[[], float] = time.monotonic):
++        from muselsl import backends
++        from muselsl.muse import Muse
++
++        self._backends = backends
++        self._Muse = Muse
++        self.clock = clock
++        self._muse = None
++        self._connected_at = 0.0
++        self._got_battery = False
++        self._asked_status = False
++
++    def scan(self, timeout_s: float) -> list[Seen]:
++        devices = self._backends.BleakBackend().scan(timeout=timeout_s)
++        return [Seen(d["name"], d["address"]) for d in devices if d["name"] and "Muse" in d["name"]]
++
++    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery) -> None:
++        def imu(kind: str):
++            def cb(samples, timestamps):
++                # muselsl stamps all three samples of a packet with the arrival
++                # time; spread them back over the packet's 3 / 52 s.
++                t_last = timestamps[-1]
++                n = samples.shape[1]
++                for i in range(n):
++                    x, y, z = (float(v) for v in samples[:, i])
++                    on_imu(kind, t_last - (n - 1 - i) / IMU_RATE_HZ, x, y, z)
++            return cb
++
++        def telemetry(t, battery, _fuel_gauge, _adc_volt, _temperature):
++            self._got_battery = True
++            on_battery(float(battery), t)
++
++        def control(message):
++            try:
++                bp = json.loads(message).get("bp")
++            except (ValueError, AttributeError):
++                return
++            if bp is not None:
++                self._got_battery = True
++                on_battery(float(bp), self.clock())
++
++        muse = self._Muse(
++            address,
++            callback_acc=imu("acc"),
++            callback_gyro=imu("gyro"),
++            callback_telemetry=telemetry,
++            callback_control=control,
++            backend="bleak",
++            time_func=self.clock,
++            name=name,
++        )
++        if not muse.connect(retries=0):
++            raise ConnectError(f"could not connect to {name}")
++        muse.start()
++        self._muse = muse
++        self._connected_at = self.clock()
++        self._got_battery = False
++        self._asked_status = False
++
++    def pump(self, seconds: float) -> None:
++        if self._muse is None:
++            time.sleep(seconds)
++            return
++        self._muse.adapter.pump(seconds)
++        if (not self._got_battery and not self._asked_status
++                and self.clock() - self._connected_at > self.ASK_STATUS_AFTER_S):
++            self._asked_status = True
++            log.info("no battery telemetry yet; asking the headset for its status")
++            self._muse.ask_control()
++            self._muse.resume()  # make sure streaming continues after the query
++
++    def disconnect(self) -> None:
++        muse, self._muse = self._muse, None
++        if muse is None:
++            return
++        try:
++            muse.stop()
++        finally:
++            muse.disconnect()
++
++
++# --- simulated headsets --------------------------------------------------------------------
++
++
++class FakeDriver:
++    """Simulated Muses for tests and `--sim-headsets`.
++
++    `headsets` maps BLE name -> starting battery percent. A connected headset
++    streams a virtual head at 52 Hz and drains its battery `drain_per_min`
++    percent per minute. `lifted_after_s` simulates staff picking it up.
++    """
++
++    def __init__(
++        self,
++        headsets: dict[str, float],
++        clock: Callable[[], float] = time.monotonic,
++        realtime: bool = True,
++        drain_per_min: float = 0.33,
++        lifted_after_s: float | None = 3.0,
++        battery_every_s: float = 10.0,
++    ):
++        from .sim.head import VirtualHead
++
++        self.battery = dict(headsets)
++        self.switched_on = set(headsets)
++        self.clock = clock
++        self.realtime = realtime
++        self.drain_per_min = drain_per_min
++        self.lifted_after_s = lifted_after_s
++        self.battery_every_s = battery_every_s
++        self.fail_connect: set[str] = set()
++        self._head_cls = VirtualHead
++        self._name: str | None = None
++        self._head = None
++        self._t_next = 0.0
++        self._connected_at = 0.0
++        self._next_battery = 0.0
++        self._on_imu: OnImu | None = None
++        self._on_battery: OnBattery | None = None
++        self.link_up = True  # set False to simulate the link dying
++
++    def address(self, name: str) -> str:
++        return f"SIM-{name}"
++
++    def scan(self, timeout_s: float) -> list[Seen]:
++        if self.realtime:
++            time.sleep(min(timeout_s, 0.5))
++        return [Seen(n, self.address(n)) for n in sorted(self.switched_on) if n != self._name]
++
++    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery) -> None:
++        if name not in self.switched_on or name in self.fail_connect or address != self.address(name):
++            raise ConnectError(f"{name} did not answer")
++        if self.battery.get(name, 0.0) <= 0.0:
++            raise ConnectError(f"{name} battery is empty")
++        self._name = name
++        self._head = self._head_cls(seed=hash(name) & 0xFFFF, worn=False)
++        self._on_imu, self._on_battery = on_imu, on_battery
++        now = self.clock()
++        self._connected_at = now
++        self._t_next = now
++        self._next_battery = now
++        self._last_drain = now
++        self.link_up = True
++        self._lifted = False
++
++    def pump(self, seconds: float) -> None:
++        if self.realtime:
++            time.sleep(seconds)
++        if self._name is None or not self.link_up:
++            return
++        now = self.clock()
++        if (not self._lifted and self.lifted_after_s is not None
++                and now - self._connected_at >= self.lifted_after_s):
++            self._lifted = True
++            self._head.set_worn(True, now)  # the put-on motion reads as a lift
++        while self._t_next <= now:
++            acc, gyro = self._head.step(self._t_next)
++            self._on_imu("acc", self._t_next, *map(float, acc))
++            self._on_imu("gyro", self._t_next, *map(float, gyro))
++            self._t_next += 1.0 / IMU_RATE_HZ
++        if now >= self._next_battery:
++            drained = self.drain_per_min * (now - self._last_drain) / 60.0
++            self._last_drain = now
++            self.battery[self._name] = max(0.0, self.battery[self._name] - drained)
++            self._on_battery(round(self.battery[self._name], 1), now)
++            self._next_battery = now + self.battery_every_s
++            if self.battery[self._name] <= 0.0:
++                self.link_up = False  # dead headset: data stops
++
++    def disconnect(self) -> None:
++        self._name = None
++        self._head = None
+diff --git a/src/neurocinema/cli.py b/src/neurocinema/cli.py
+index 45d57df..a782b6d 100644
+--- a/src/neurocinema/cli.py
++++ b/src/neurocinema/cli.py
+@@ -38,6 +38,35 @@ def setup_logging(cfg: Config, level_override: str | None) -> None:
+             log.warning("cannot write log file %s: %s", path, e)
+ 
+ 
++# Starting battery of the simulated headsets (--sim-headsets). A starts low so
++# the "swap soon" state shows up within a few minutes.
++SIM_BATTERY = {"A": 22.0, "B": 96.0, "C": 71.0, "D": 100.0}
++
++
++def make_headset_manager(cfg: Config, simulated: bool):
++    from .ble import BleWorker
++    from .headsets import HeadsetManager
++
++    if simulated:
++        from .ble import FakeDriver
++
++        driver = FakeDriver({f"Muse-SIM{label}": pct for label, pct in SIM_BATTERY.items()})
++    else:
++        if not cfg.headsets.registry:
++            log.error("source.kind = 'muse_direct' needs headsets.registry, e.g. "
++                      "registry = [\"A=Muse-41D2\"] in config/local.toml (names from `muselsl list`)")
++            return None
++        try:
++            from .ble import MuselslDriver
++
++            driver = MuselslDriver()
++        except ImportError as e:
++            log.error("headset support is not installed (%s); run: pip install -e '.[muse]'", e)
++            return None
++    log.info("headsets: %s", ", ".join(cfg.headsets.registry))
++    return HeadsetManager(cfg.headsets, BleWorker(driver))
++
++
+ def parse_args(argv: list[str] | None) -> argparse.Namespace:
+     p = argparse.ArgumentParser(prog="nc-engine", description=__doc__)
+     p.add_argument("-c", "--config", type=Path, action="append",
+@@ -46,6 +75,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
+     p.add_argument("--no-keyboard", action="store_true", help="simulator without keyboard control")
+     p.add_argument("--unmanaged", action="store_true",
+                    help="do not launch muselsl; read LSL streams published by something else")
++    p.add_argument("--sim-headsets", action="store_true",
++                   help="in-process headset manager with four simulated headsets (try the status page)")
+     p.add_argument("--log-level", help="DEBUG, INFO, WARNING ...")
+     return p.parse_args(argv)
+ 
+@@ -62,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
+         cfg.source.kind = "sim"
+     if args.unmanaged:
+         cfg.muse.manage_stream = False
++    if args.sim_headsets:
++        cfg.source.kind = "muse_direct"
++        cfg.headsets.registry = [f"{label}=Muse-SIM{label}" for label in SIM_BATTERY]
+     setup_logging(cfg, args.log_level)
+     log.info("config: %s", ", ".join(map(str, paths)) or "built-in defaults")
+ 
+@@ -79,6 +113,21 @@ def main(argv: list[str] | None = None) -> int:
+         from .sources.sim import SimSource
+ 
+         source = SimSource()
++    elif cfg.source.kind == "muse_direct":
++        source = make_headset_manager(cfg, simulated=args.sim_headsets)
++        if source is None:
++            return 4
++        if cfg.status_page.enabled:
++            from .statuspage import StatusPage
++
++            try:
++                page = StatusPage(source, cfg.status_page.host, cfg.status_page.port)
++            except OSError as e:
++                log.error("cannot serve the status page on %s:%d (%s)",
++                          cfg.status_page.host, cfg.status_page.port, e)
++                return 3
++            page.start()
++            closers.append(page.close)
+     else:
+         try:
+             from .sources.lsl import LslImuSource
+diff --git a/src/neurocinema/config.py b/src/neurocinema/config.py
+index 2b95e35..a30080a 100644
+--- a/src/neurocinema/config.py
++++ b/src/neurocinema/config.py
+@@ -21,7 +21,8 @@ class ConfigError(ValueError):
+ 
+ @dataclass
+ class SourceConfig:
+-    # "muse" reads the headset through LSL; "sim" runs a virtual head (no hardware).
++    # "muse" reads the headset through LSL; "sim" runs a virtual head (no hardware);
++    # "muse_direct" connects to the headset in-process (battery, staff headset swaps).
+     kind: str = "muse"
+ 
+ 
+@@ -54,6 +55,57 @@ class MuseConfig:
+     pidfile: str = "run/muselsl.pid"
+ 
+ 
++@dataclass
++class HeadsetsConfig:
++    """In-process headset connection (source.kind = "muse_direct")."""
++
++    # Registered headsets, "LABEL=BLE name", e.g. ["A=Muse-41D2", "B=Muse-0C3A"].
++    # The label is the sticker on the headset. Only these are ever connected.
++    registry: list[str] = field(default_factory=list)
++    # Looking for headsets while none is in use.
++    scan_interval_s: float = 10.0
++    scan_timeout_s: float = 5.0
++    connect_attempts: int = 3
++    # After staff choose a headset, it is used only once it moves (they lift it):
++    # gyro above this, within the timeout.
++    confirm_dps: float = 40.0
++    confirm_timeout_s: float = 120.0
++    # In use: no samples this long = lost; then retry the same headset this often.
++    stale_after_s: float = 2.0
++    reconnect_interval_s: float = 5.0
++    # Status: "offline" after this long without a headset in use; "swap soon"
++    # below this battery level or estimated time left.
++    offline_after_s: float = 60.0
++    swap_soon_percent: float = 20.0
++    swap_soon_minutes: float = 30.0
++    # Fallback when nobody confirms: after this long with no headset, use the
++    # only registered headset in range without confirmation. 0 = off.
++    auto_adopt_after_s: float = 0.0
++
++    def entries(self) -> list[tuple[str, str]]:
++        """(label, BLE name) pairs; raises ConfigError if malformed."""
++        out = []
++        for item in self.registry:
++            label, sep, name = (part.strip() for part in item.partition("="))
++            if not sep or not label or not name:
++                raise ConfigError(f"headsets.registry: expected 'LABEL=Muse-XXXX', got {item!r}")
++            out.append((label, name))
++        labels = [label for label, _ in out]
++        names = [name for _, name in out]
++        if len(set(labels)) != len(labels) or len(set(names)) != len(names):
++            raise ConfigError("headsets.registry: labels and names must be unique")
++        return out
++
++
++@dataclass
++class StatusPageConfig:
++    # Local web page for staff (muse_direct only). host "0.0.0.0" makes it
++    # reachable from a tablet on the same network.
++    enabled: bool = True
++    host: str = "127.0.0.1"
++    port: int = 8080
++
++
+ @dataclass
+ class ImuConfig:
+     # Sensor axis pointing out of the forehead. Verify on the real headset.
+@@ -181,6 +233,8 @@ class LoggingConfig:
+ class Config:
+     source: SourceConfig = field(default_factory=SourceConfig)
+     muse: MuseConfig = field(default_factory=MuseConfig)
++    headsets: HeadsetsConfig = field(default_factory=HeadsetsConfig)
++    status_page: StatusPageConfig = field(default_factory=StatusPageConfig)
+     imu: ImuConfig = field(default_factory=ImuConfig)
+     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
+     targets: TargetsConfig = field(default_factory=TargetsConfig)
+@@ -190,8 +244,12 @@ class Config:
+     logging: LoggingConfig = field(default_factory=LoggingConfig)
+ 
+     def validate(self) -> None:
+-        if self.source.kind not in ("muse", "sim"):
+-            raise ConfigError(f"source.kind must be 'muse' or 'sim', got {self.source.kind!r}")
++        if self.source.kind not in ("muse", "sim", "muse_direct"):
++            raise ConfigError(
++                f"source.kind must be 'muse', 'sim' or 'muse_direct', got {self.source.kind!r}")
++        self.headsets.entries()
++        if self.headsets.connect_attempts < 1:
++            raise ConfigError("headsets.connect_attempts must be at least 1")
+         if self.imu.forward_axis not in AXIS_NAMES:
+             raise ConfigError(f"imu.forward_axis must be one of {AXIS_NAMES}")
+         t = self.targets
+diff --git a/b/src/neurocinema/headsets.py b/src/neurocinema/headsets.py
+new file mode 100644
+index 0000000..fbb8f3c
+--- /dev/null
++++ b/src/neurocinema/headsets.py
+@@ -0,0 +1,363 @@
++"""Headset manager: which headset is in use, its battery, and staff swaps.
++
++It is also the engine's IMU source (`source.kind = "muse_direct"`): samples
++reach the engine only from the headset staff chose and confirmed.
++
++    NO_HEADSET ──staff tap──► CONNECTING ──connected──► CONFIRMING ──lifted──► ACTIVE
++        ▲                        │ failed n times          │ timeout            │ no data
++        └────────────────────────┴─────────────────────────┘                    ▼
++                                                                         RECONNECTING
++                                                         (same headset, until data returns
++                                                          or staff choose another one)
++
++Staff confirm a swap by tapping the headset's sticker label on the status
++page and lifting that headset: the engine only uses it once it sees it move,
++so the wrong headset can never be locked in. Headsets outside the registry
++are never connected.
++
++Status for the page, kept to three states: `ok`, `swap_soon` (battery or
++estimated time left is low) and `offline` (no headset in use for a while).
++"""
++
++from __future__ import annotations
++
++import logging
++import math
++import queue
++import threading
++import time
++from collections import deque
++from collections.abc import Callable
++from dataclasses import dataclass, field
++from enum import StrEnum
++
++from .ble import Seen
++from .config import HeadsetsConfig
++from .samples import ImuSample
++from .sources.base import RateMeter
++
++log = logging.getLogger(__name__)
++
++BATTERY_WINDOW_S = 20 * 60.0  # drain-rate estimate uses the last 20 minutes...
++BATTERY_MIN_SPAN_S = 5 * 60.0  # ...once it covers at least 5
++
++
++class Phase(StrEnum):
++    NO_HEADSET = "no_headset"
++    CONNECTING = "connecting"
++    CONFIRMING = "confirming"
++    ACTIVE = "active"
++    RECONNECTING = "reconnecting"
++
++
++class Alert(StrEnum):
++    OK = "ok"
++    SWAP_SOON = "swap_soon"
++    OFFLINE = "offline"
++
++
++@dataclass
++class Headset:
++    label: str
++    name: str
++    address: str | None = None
++    last_seen: float | None = None
++    battery: float | None = None
++    battery_at: float | None = None
++    history: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=400))
++
++    def record_battery(self, percent: float, t: float) -> None:
++        self.battery, self.battery_at = percent, t
++        self.history.append((t, percent))
++        while self.history and self.history[0][0] < t - BATTERY_WINDOW_S:
++            self.history.popleft()
++
++    def minutes_left(self) -> float | None:
++        """Linear fit of recent battery readings; None until there is enough."""
++        if len(self.history) < 3 or self.history[-1][0] - self.history[0][0] < BATTERY_MIN_SPAN_S:
++            return None
++        ts = [t for t, _ in self.history]
++        ps = [p for _, p in self.history]
++        mt, mp = sum(ts) / len(ts), sum(ps) / len(ps)
++        var = sum((t - mt) ** 2 for t in ts)
++        if var == 0:
++            return None
++        slope = sum((t - mt) * (p - mp) for t, p in zip(ts, ps, strict=True)) / var  # % per s
++        if slope >= 0:
++            return None
++        return max(0.0, ps[-1] / -slope / 60.0)
++
++
++class HeadsetManager:
++    """Drives a `ble.BleWorker`; implements the engine's `ImuSource`."""
++
++    def __init__(self, cfg: HeadsetsConfig, worker, clock: Callable[[], float] = time.monotonic):
++        self.cfg = cfg
++        self.worker = worker
++        self.clock = clock
++        self.headsets = {label: Headset(label, name) for label, name in cfg.entries()}
++        self._by_name = {h.name: h for h in self.headsets.values()}
++        self.unknown: dict[str, float] = {}  # unregistered Muses seen: name -> last seen
++        now = clock()
++        self.phase = Phase.NO_HEADSET
++        self.phase_since = now
++        self.current: str | None = None  # label chosen / in use
++        self.auto_adopted = False
++        self.message = "Choose a headset to start."
++        self._attempts = 0
++        self._next_scan = now
++        self._next_connect = now
++        self._confirm_deadline = 0.0
++        self._last_receive: float | None = None
++        self._rate = RateMeter()
++        self._commands: queue.Queue[tuple] = queue.Queue()
++        self._snapshot_lock = threading.Lock()
++        self._snapshot: dict = {}
++        self._update_snapshot(now)
++
++    # --- staff commands (any thread) -------------------------------------------------------
++
++    def submit(self, command: str, arg: str | None = None) -> None:
++        """"select" <label>, "release", "reconnect"."""
++        self._commands.put((command, arg))
++
++    def snapshot(self) -> dict:
++        with self._snapshot_lock:
++            return dict(self._snapshot)
++
++    # --- ImuSource ---------------------------------------------------------------------------
++
++    def now(self) -> float:
++        return self.clock()
++
++    def poll(self) -> list[ImuSample]:
++        now = self.clock()
++        while True:
++            try:
++                command, arg = self._commands.get_nowait()
++            except queue.Empty:
++                break
++            self._command(command, arg, now)
++        for event in self.worker.events():
++            self._event(event, now)
++        samples = self._readings(now)
++        self._timers(now)
++        self._update_snapshot(now)
++        return samples
++
++    def connected(self) -> bool:
++        return (
++            self.phase == Phase.ACTIVE
++            and self._last_receive is not None
++            and self.clock() - self._last_receive <= self.cfg.stale_after_s
++        )
++
++    def last_receive(self) -> float | None:
++        return self._last_receive
++
++    def rate_hz(self) -> float:
++        return self._rate.rate(self.clock())
++
++    def reset(self) -> None:
++        """`/nc/cmd/restart_stream`: reconnect the current headset."""
++        self.submit("reconnect")
++
++    def close(self) -> None:
++        self.worker.close()
++
++    # --- internals -----------------------------------------------------------------------------
++
++    def _set_phase(self, phase: Phase, now: float, message: str) -> None:
++        if phase != self.phase:
++            log.info("headset %s -> %s (%s)", self.current or "-", phase.value, message)
++            self.phase, self.phase_since = phase, now
++        self.message = message
++        if phase in (Phase.NO_HEADSET, Phase.CONNECTING, Phase.CONFIRMING):
++            self._last_receive = None
++            self._rate.clear()
++
++    def _command(self, command: str, arg: str | None, now: float) -> None:
++        log.info("staff command: %s %s", command, arg or "")
++        if command == "select":
++            if arg not in self.headsets:
++                log.warning("unknown headset label %r", arg)
++                return
++            self._start_connect(arg, now, auto=False)
++        elif command == "release":
++            self.worker.request_disconnect()
++            self.current = None
++            self._set_phase(Phase.NO_HEADSET, now, "Headset released. Choose a headset to start.")
++        elif command == "reconnect":
++            if self.current is None:
++                return
++            self.worker.request_disconnect()
++            if self.phase == Phase.ACTIVE or self.phase == Phase.RECONNECTING:
++                self._set_phase(Phase.RECONNECTING, now, f"Reconnecting to headset {self.current}…")
++                self._next_connect = now
++            else:
++                self._start_connect(self.current, now, auto=self.auto_adopted)
++
++    def _start_connect(self, label: str, now: float, auto: bool) -> None:
++        h = self.headsets[label]
++        self.worker.request_disconnect()
++        self.current = label
++        self.auto_adopted = auto
++        self._attempts = 1
++        self.worker.request_connect(label, h.name, h.address)
++        self._set_phase(Phase.CONNECTING, now, f"Connecting to headset {label}…")
++
++    def _event(self, event: tuple, now: float) -> None:
++        kind = event[0]
++        if kind == "scan":
++            seen: list[Seen] = event[1]
++            for s in seen:
++                h = self._by_name.get(s.name)
++                if h is not None:
++                    h.address, h.last_seen = s.address, now
++                else:
++                    self.unknown[s.name] = now
++        elif kind == "battery":
++            _, label, percent, t = event
++            if label in self.headsets:
++                self.headsets[label].record_battery(percent, t)
++        elif kind == "connected":
++            label = event[1]
++            if label != self.current:
++                self.worker.request_disconnect()  # a stale request finished late
++                return
++            if self.phase == Phase.RECONNECTING or self.auto_adopted:
++                self._set_phase(Phase.ACTIVE, now, f"Headset {label} connected.")
++            else:
++                self._confirm_deadline = now + self.cfg.confirm_timeout_s
++                self._set_phase(Phase.CONFIRMING, now, f"Pick up headset {label} to confirm.")
++        elif kind == "connect_failed":
++            _, label, reason = event
++            if label != self.current:
++                return
++            if self.phase == Phase.CONNECTING:
++                if self._attempts < self.cfg.connect_attempts:
++                    self._attempts += 1
++                    self.worker.request_connect(label, self.headsets[label].name, None)
++                else:
++                    self.current = None
++                    self._set_phase(Phase.NO_HEADSET, now,
++                                    f"Could not reach headset {label}. Is it switched on and charged?")
++            elif self.phase == Phase.RECONNECTING:
++                self._next_connect = now + self.cfg.reconnect_interval_s
++                self.message = f"Headset {label} lost. Retrying… ({reason})"
++        elif kind == "disconnected":
++            label = event[1]
++            if label == self.current and self.phase == Phase.ACTIVE:
++                self._lost(now)
++
++    def _readings(self, now: float) -> list[ImuSample]:
++        out: list[ImuSample] = []
++        for r in self.worker.readings():
++            if r.label != self.current:
++                continue
++            if self.phase == Phase.CONFIRMING:
++                if r.kind == "gyro" and math.sqrt(r.x * r.x + r.y * r.y + r.z * r.z) >= self.cfg.confirm_dps:
++                    self._set_phase(Phase.ACTIVE, now, f"Headset {r.label} in use.")
++                continue
++            if self.phase in (Phase.ACTIVE, Phase.RECONNECTING):
++                if self.phase == Phase.RECONNECTING:
++                    self._set_phase(Phase.ACTIVE, now, f"Headset {r.label} back.")
++                out.append(ImuSample(r.t, r.kind, r.x, r.y, r.z))
++                if r.kind == "gyro":
++                    self._rate.add(now)
++        if out:
++            self._last_receive = now
++            out.sort(key=lambda s: s.t)
++        return out
++
++    def _lost(self, now: float) -> None:
++        self.worker.request_disconnect()
++        self._next_connect = now + 0.5
++        self._set_phase(Phase.RECONNECTING, now, f"Headset {self.current} lost. Reconnecting…")
++
++    def _timers(self, now: float) -> None:
++        c = self.cfg
++        if self.phase == Phase.ACTIVE:
++            ref = self._last_receive if self._last_receive is not None else self.phase_since
++            if now - ref > c.stale_after_s:
++                self._lost(now)
++        elif self.phase == Phase.CONFIRMING and now > self._confirm_deadline:
++            label = self.current
++            self.worker.request_disconnect()
++            self.current = None
++            self._set_phase(Phase.NO_HEADSET, now,
++                            f"Headset {label} was not picked up, so it was not used. Choose again.")
++        elif self.phase == Phase.RECONNECTING and now >= self._next_connect and not self.worker.busy:
++            h = self.headsets[self.current]
++            self._next_connect = now + c.reconnect_interval_s
++            self.worker.request_connect(h.label, h.name, None)  # rescan: the address may change
++        elif self.phase == Phase.NO_HEADSET:
++            if now >= self._next_scan and not self.worker.busy:
++                self._next_scan = now + c.scan_interval_s
++                self.worker.request_scan(c.scan_timeout_s)
++            if c.auto_adopt_after_s > 0 and now - self.phase_since >= c.auto_adopt_after_s:
++                fresh = [h for h in self.headsets.values()
++                         if h.last_seen is not None and now - h.last_seen <= 2 * c.scan_interval_s]
++                if len(fresh) == 1:
++                    log.warning("nobody chose a headset for %.0f s; using the only one in range: %s",
++                                now - self.phase_since, fresh[0].label)
++                    self._start_connect(fresh[0].label, now, auto=True)
++
++    def alert(self, now: float) -> Alert:
++        if self.phase != Phase.ACTIVE:
++            return Alert.OFFLINE if now - self.phase_since >= self.cfg.offline_after_s else Alert.OK
++        h = self.headsets[self.current]
++        left = h.minutes_left()
++        if (h.battery is not None and h.battery < self.cfg.swap_soon_percent) or (
++                left is not None and left < self.cfg.swap_soon_minutes):
++            return Alert.SWAP_SOON
++        return Alert.OK
++
++    def _headline(self, now: float, alert: Alert) -> str:
++        h = self.headsets.get(self.current) if self.current else None
++        if alert == Alert.OFFLINE:
++            return "Offline: no headset in use"
++        if self.phase == Phase.ACTIVE and h is not None:
++            battery = "battery unknown" if h.battery is None else f"{h.battery:.0f} %"
++            left = h.minutes_left()
++            extra = "" if left is None else f", about {_duration(left)} left"
++            if alert == Alert.SWAP_SOON:
++                return f"Swap headset {h.label} soon ({battery}{extra})"
++            return f"All good: headset {h.label}, {battery}{extra}"
++        return self.message
++
++    def _update_snapshot(self, now: float) -> None:
++        alert = self.alert(now)
++        headsets = []
++        for h in self.headsets.values():
++            headsets.append({
++                "label": h.label,
++                "name": h.name,
++                "in_use": h.label == self.current and self.phase == Phase.ACTIVE,
++                "chosen": h.label == self.current,
++                "seen_s_ago": None if h.last_seen is None else round(now - h.last_seen),
++                "battery": None if h.battery is None else round(h.battery),
++                "battery_s_ago": None if h.battery_at is None else round(now - h.battery_at),
++                "minutes_left": None if h.minutes_left() is None else round(h.minutes_left()),
++            })
++        snap = {
++            "alert": alert.value,
++            "headline": self._headline(now, alert),
++            "message": self.message,
++            "phase": self.phase.value,
++            "phase_s": round(now - self.phase_since),
++            "current": self.current,
++            "auto_adopted": self.auto_adopted,
++            "receiving": self.connected(),
++            "rate_hz": round(self.rate_hz(), 1),
++            "headsets": headsets,
++            "unknown": sorted(n for n, t in self.unknown.items() if now - t <= 5 * self.cfg.scan_interval_s),
++        }
++        with self._snapshot_lock:
++            self._snapshot = snap
++
++
++def _duration(minutes: float) -> str:
++    if minutes >= 90:
++        return f"{minutes / 60:.1f} h"
++    return f"{minutes:.0f} min"
+diff --git a/b/src/neurocinema/static/status.html b/src/neurocinema/static/status.html
+new file mode 100644
+index 0000000..ea2d699
+--- /dev/null
++++ b/src/neurocinema/static/status.html
+@@ -0,0 +1,169 @@
++<!doctype html>
++<html lang="en">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width, initial-scale=1">
++<title>Neurocinema status</title>
++<style>
++  :root {
++    --bg: #f6f5f2; --card: #ffffff; --ink: #1d1d1b; --quiet: #6b6a66; --line: #dddbd5;
++    --ok: #1f7a4d; --ok-bg: #e3f3ea; --warn: #9a5b00; --warn-bg: #fdf0d9;
++    --bad: #a8261b; --bad-bg: #fbe3e0; --accent: #2457c5;
++  }
++  @media (prefers-color-scheme: dark) {
++    :root {
++      --bg: #161615; --card: #20201f; --ink: #f1f0ec; --quiet: #a3a29d; --line: #3a3936;
++      --ok: #5cc98f; --ok-bg: #173526; --warn: #f0b54d; --warn-bg: #3a2c12;
++      --bad: #f2786c; --bad-bg: #3d1a17; --accent: #7aa2ff;
++    }
++  }
++  * { box-sizing: border-box; }
++  body { margin: 0; background: var(--bg); color: var(--ink);
++         font: 17px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
++  main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
++  .banner { border-radius: 14px; padding: 22px 20px; margin-bottom: 18px; border: 2px solid transparent; }
++  .banner h1 { margin: 0; font-size: 28px; line-height: 1.2; }
++  .banner p { margin: 8px 0 0; color: var(--quiet); }
++  .ok   { background: var(--ok-bg);   border-color: var(--ok); }
++  .ok h1 { color: var(--ok); }
++  .swap_soon { background: var(--warn-bg); border-color: var(--warn); }
++  .swap_soon h1 { color: var(--warn); }
++  .offline { background: var(--bad-bg); border-color: var(--bad); }
++  .offline h1 { color: var(--bad); }
++  .action { background: var(--card); border-color: var(--accent); }
++  .action h1 { color: var(--accent); }
++  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--quiet); margin: 26px 0 10px; }
++  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 12px; }
++  .hs { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
++  .hs.in-use { border: 2px solid var(--ok); }
++  .hs .label { font-size: 34px; font-weight: 700; line-height: 1; }
++  .hs .meta { color: var(--quiet); font-size: 14px; margin: 6px 0 10px; min-height: 40px; }
++  button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
++           color: var(--ink); padding: 10px 14px; cursor: pointer; width: 100%; }
++  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
++  button:disabled { opacity: .45; cursor: default; }
++  .row { display: flex; gap: 10px; flex-wrap: wrap; }
++  .row button { width: auto; }
++  .small { color: var(--quiet); font-size: 14px; }
++  code { font-size: 13px; }
++  #conn { display: none; }
++</style>
++</head>
++<body>
++<main>
++  <div id="banner" class="banner"><h1 id="headline">Loading…</h1><p id="detail"></p></div>
++  <p id="conn" class="small">Cannot reach the engine. Is the computer on and nc-engine running?</p>
++
++  <h2>Headsets</h2>
++  <div id="headsets" class="grid"></div>
++  <p class="small">To swap: wait until nobody wears the headset, switch the old one off and put it on the charger,
++    switch a charged one on, tap its letter here, then pick it up.</p>
++
++  <h2>Tools</h2>
++  <div class="row">
++    <button id="reconnect">Reconnect</button>
++    <button id="release">Stop using headset</button>
++    <button id="sound">Turn on alert sound</button>
++  </div>
++  <div id="unknown"></div>
++</main>
++<script>
++const $ = (id) => document.getElementById(id);
++let soundOn = false, audio = null, lastAlert = "ok", lastBeep = 0, current = null;
++
++function beep() {
++  if (!soundOn || !audio) return;
++  const o = audio.createOscillator(), g = audio.createGain();
++  o.frequency.value = 880; g.gain.value = 0.15;
++  o.connect(g); g.connect(audio.destination);
++  o.start(); o.stop(audio.currentTime + 0.35);
++}
++
++$("sound").onclick = () => {
++  soundOn = !soundOn;
++  if (soundOn && !audio) audio = new (window.AudioContext || window.webkitAudioContext)();
++  $("sound").textContent = soundOn ? "Turn off alert sound" : "Turn on alert sound";
++  if (soundOn) beep();
++};
++
++async function post(path, body) {
++  await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
++                      body: JSON.stringify(body || {}) });
++  refresh();
++}
++$("reconnect").onclick = () => post("/api/reconnect");
++$("release").onclick = () => {
++  if (confirm("Stop using the current headset?")) post("/api/release");
++};
++
++function ago(s) {
++  if (s === null || s === undefined) return null;
++  if (s < 90) return `${s} s ago`;
++  if (s < 5400) return `${Math.round(s / 60)} min ago`;
++  return `${(s / 3600).toFixed(1)} h ago`;
++}
++
++function render(s) {
++  const busy = s.phase === "connecting" || s.phase === "confirming";
++  $("banner").className = "banner " + (busy && s.alert !== "offline" ? "action" : s.alert);
++  $("headline").textContent = busy ? s.message : s.headline;
++  $("detail").textContent = busy || s.headline === s.message ? "" : s.message;
++
++  current = s.current;
++  const box = $("headsets");
++  box.replaceChildren(...s.headsets.map((h) => {
++    const card = document.createElement("div");
++    card.className = "hs" + (h.in_use ? " in-use" : "");
++    const meta = [];
++    if (h.in_use) meta.push("In use");
++    else if (h.chosen) meta.push("Chosen");
++    if (h.battery !== null) meta.push(`${h.battery} %` + (h.in_use ? "" : ` (${ago(h.battery_s_ago)})`));
++    if (h.minutes_left !== null && h.in_use) meta.push(`about ${h.minutes_left} min left`);
++    if (!h.chosen && h.seen_s_ago !== null) meta.push(h.seen_s_ago < 30 ? "switched on" : `seen ${ago(h.seen_s_ago)}`);
++    card.innerHTML = `<div class="label"></div><div class="meta"></div>`;
++    card.querySelector(".label").textContent = h.label;
++    card.querySelector(".meta").textContent = meta.join(" · ") || "Not seen yet";
++    const b = document.createElement("button");
++    b.textContent = h.chosen ? (h.in_use ? "In use" : "Waiting…") : `Use headset ${h.label}`;
++    b.className = h.chosen ? "" : "primary";
++    b.disabled = h.chosen;
++    b.onclick = () => {
++      if (!current || confirm(`Switch from headset ${current} to ${h.label}? Only do this between visitors.`))
++        post("/api/select", { label: h.label });
++    };
++    card.appendChild(b);
++    return card;
++  }));
++
++  const unk = $("unknown");
++  unk.innerHTML = "";
++  if (s.unknown.length) {
++    const p = document.createElement("p");
++    p.className = "small";
++    p.textContent = "Other Muse headsets nearby (not registered, never used): " + s.unknown.join(", ") +
++      ". To add one, put e.g. \"E=" + s.unknown[0] + "\" in headsets.registry in config/local.toml.";
++    unk.appendChild(p);
++  }
++
++  if (s.alert !== "ok" && (s.alert !== lastAlert || Date.now() - lastBeep > 300000)) {
++    beep(); lastBeep = Date.now();
++  }
++  lastAlert = s.alert;
++}
++
++async function refresh() {
++  try {
++    const r = await fetch("/api/status", { cache: "no-store" });
++    render(await r.json());
++    $("conn").style.display = "none";
++  } catch (e) {
++    $("conn").style.display = "block";
++    $("banner").className = "banner offline";
++    $("headline").textContent = "Status page lost contact with the engine";
++  }
++}
++refresh();
++setInterval(refresh, 1000);
++</script>
++</body>
++</html>
+diff --git a/b/src/neurocinema/statuspage.py b/src/neurocinema/statuspage.py
+new file mode 100644
+index 0000000..613a54c
+--- /dev/null
++++ b/src/neurocinema/statuspage.py
+@@ -0,0 +1,95 @@
++"""Local status page for staff: one page, a few buttons, no internet needed.
++
++    GET  /             the page
++    GET  /api/status   the headset manager's snapshot (JSON)
++    POST /api/select   {"label": "B"}   use headset B (staff then lift it)
++    POST /api/release  stop using the current headset
++    POST /api/reconnect
++
++Runs on its own thread; commands are queued to the main loop.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import threading
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from importlib.resources import files
++
++from .headsets import HeadsetManager
++
++log = logging.getLogger(__name__)
++
++MAX_BODY = 1024
++
++
++class StatusPage:
++    def __init__(self, manager: HeadsetManager, host: str, port: int):
++        self.manager = manager
++        page = files("neurocinema").joinpath("static/status.html").read_bytes()
++        handler = _make_handler(manager, page)
++        self.server = ThreadingHTTPServer((host, port), handler)
++        self.server.daemon_threads = True
++        self.address = f"http://{host}:{self.server.server_address[1]}"
++        self._thread = threading.Thread(target=self.server.serve_forever, name="status-page", daemon=True)
++
++    def start(self) -> None:
++        self._thread.start()
++        log.info("status page on %s", self.address)
++
++    def close(self) -> None:
++        self.server.shutdown()
++        self.server.server_close()
++
++
++def _make_handler(manager: HeadsetManager, page: bytes):
++    class Handler(BaseHTTPRequestHandler):
++        def log_message(self, fmt, *args):  # keep the engine log clean
++            log.debug("%s " + fmt, self.address_string(), *args)
++
++        def _send(self, code: int, body: bytes, ctype: str) -> None:
++            self.send_response(code)
++            self.send_header("Content-Type", ctype)
++            self.send_header("Content-Length", str(len(body)))
++            self.send_header("Cache-Control", "no-store")
++            self.end_headers()
++            self.wfile.write(body)
++
++        def _json(self, code: int, data: dict) -> None:
++            self._send(code, json.dumps(data).encode(), "application/json")
++
++        def do_GET(self):
++            if self.path in ("/", "/index.html"):
++                self._send(200, page, "text/html; charset=utf-8")
++            elif self.path == "/api/status":
++                self._json(200, manager.snapshot())
++            else:
++                self._json(404, {"error": "not found"})
++
++        def do_POST(self):
++            length = int(self.headers.get("Content-Length") or 0)
++            if length > MAX_BODY:
++                self._json(413, {"error": "too large"})
++                return
++            try:
++                body = json.loads(self.rfile.read(length) or b"{}")
++            except ValueError:
++                self._json(400, {"error": "bad json"})
++                return
++            if self.path == "/api/select":
++                label = body.get("label") if isinstance(body, dict) else None
++                if label not in {h["label"] for h in manager.snapshot().get("headsets", [])}:
++                    self._json(400, {"error": "unknown headset"})
++                    return
++                manager.submit("select", label)
++            elif self.path == "/api/release":
++                manager.submit("release")
++            elif self.path == "/api/reconnect":
++                manager.submit("reconnect")
++            else:
++                self._json(404, {"error": "not found"})
++                return
++            self._json(200, {"ok": True})
++
++    return Handler
+diff --git a/b/tests/test_headsets.py b/tests/test_headsets.py
+new file mode 100644
+index 0000000..44f2b9e
+--- /dev/null
++++ b/tests/test_headsets.py
+@@ -0,0 +1,215 @@
++"""Headset manager + Bluetooth worker with simulated headsets on a fake clock."""
++
++import json
++import urllib.request
++
++import pytest
++
++from neurocinema.ble import BleWorker, FakeDriver
++from neurocinema.config import ConfigError, HeadsetsConfig, load_config
++from neurocinema.headsets import Alert, HeadsetManager, Phase
++
++REGISTRY = ["A=Muse-AAAA", "B=Muse-BBBB"]
++
++
++class Clock:
++    def __init__(self):
++        self.t = 1000.0
++
++    def __call__(self):
++        return self.t
++
++
++class Harness:
++    def __init__(self, batteries=None, lifted_after_s=3.0, **cfg):
++        self.clock = Clock()
++        self.driver = FakeDriver(
++            batteries or {"Muse-AAAA": 90.0, "Muse-BBBB": 80.0, "Muse-ZZZZ": 50.0},
++            clock=self.clock, realtime=False, lifted_after_s=lifted_after_s,
++        )
++        self.worker = BleWorker(self.driver, start_thread=False)
++        self.cfg = HeadsetsConfig(registry=cfg.pop("registry", REGISTRY), **cfg)
++        self.m = HeadsetManager(self.cfg, self.worker, clock=self.clock)
++        self.samples = []
++
++    def run(self, seconds, dt=0.05):
++        end = self.clock.t + seconds
++        while self.clock.t < end:
++            self.clock.t += dt
++            for _ in range(4):
++                self.worker.step()
++            self.samples += self.m.poll()
++
++    def use(self, label):
++        self.m.submit("select", label)
++        self.run(5.0)
++
++    @property
++    def snap(self):
++        return self.m.snapshot()
++
++
++def test_staff_swap_is_used_only_once_lifted():
++    h = Harness()
++    h.run(1.0)
++    assert h.m.phase == Phase.NO_HEADSET
++    h.m.submit("select", "A")
++    h.run(1.0)
++    assert h.m.phase == Phase.CONFIRMING
++    assert h.samples == []  # connected, but not used until lifted
++    assert not h.m.connected()
++    h.run(4.0)  # the fake headset is lifted 3 s after connecting
++    assert h.m.phase == Phase.ACTIVE
++    assert h.m.connected()
++    assert len(h.samples) > 50
++    assert h.snap["current"] == "A"
++
++
++def test_headset_not_lifted_is_released():
++    h = Harness(lifted_after_s=None, confirm_timeout_s=10.0)
++    h.m.submit("select", "B")
++    h.run(12.0)
++    assert h.m.phase == Phase.NO_HEADSET
++    assert h.m.current is None
++    assert "not picked up" in h.m.message
++    assert h.samples == []
++
++
++def test_switching_headsets_without_restart():
++    h = Harness()
++    h.use("A")
++    assert h.m.phase == Phase.ACTIVE
++    h.use("B")
++    assert h.m.phase == Phase.ACTIVE
++    assert h.m.current == "B"
++    assert h.driver._name == "Muse-BBBB"
++
++
++def test_unregistered_headset_is_listed_but_never_used():
++    h = Harness()
++    h.run(1.0)  # first scan
++    assert h.snap["unknown"] == ["Muse-ZZZZ"]
++    assert [x["label"] for x in h.snap["headsets"]] == ["A", "B"]
++    h.m.submit("select", "Z")  # not a label: ignored
++    h.run(2.0)
++    assert h.m.phase == Phase.NO_HEADSET
++
++
++def test_lost_link_reconnects_the_same_headset():
++    h = Harness(reconnect_interval_s=2.0)
++    h.use("A")
++    h.driver.link_up = False  # data stops (out of range)...
++    h.driver.switched_on.discard("Muse-AAAA")  # ...and it cannot be reached
++    h.run(6.0)
++    assert h.m.phase == Phase.RECONNECTING
++    assert not h.m.connected()
++    h.driver.switched_on.add("Muse-AAAA")  # back in range
++    h.run(3.0)
++    assert h.m.phase == Phase.ACTIVE
++    assert h.m.current == "A"
++
++
++def test_failed_connects_give_up_with_a_message():
++    h = Harness(connect_attempts=2)
++    h.driver.fail_connect.add("Muse-BBBB")
++    h.m.submit("select", "B")
++    h.run(2.0)
++    assert h.m.phase == Phase.NO_HEADSET
++    assert "Could not reach headset B" in h.m.message
++
++
++def test_battery_low_means_swap_soon():
++    h = Harness(batteries={"Muse-AAAA": 19.0, "Muse-BBBB": 80.0})
++    h.use("A")
++    assert h.m.alert(h.clock.t) == Alert.SWAP_SOON
++    assert "Swap headset A soon" in h.snap["headline"]
++    h.use("B")
++    assert h.m.alert(h.clock.t) == Alert.OK
++    assert h.snap["headline"].startswith("All good: headset B, 80 %")
++
++
++def test_time_left_estimate_from_drain():
++    h = Harness(batteries={"Muse-AAAA": 60.0, "Muse-BBBB": 80.0})
++    h.driver.drain_per_min = 1.0
++    h.use("A")
++    h.run(8 * 60.0, dt=0.5)
++    a = next(x for x in h.snap["headsets"] if x["label"] == "A")
++    assert a["battery"] == pytest.approx(52, abs=1)
++    assert a["minutes_left"] == pytest.approx(52, abs=3)
++    assert h.m.alert(h.clock.t) == Alert.OK
++    h.run(25 * 60.0, dt=0.5)  # under 30 min left
++    assert h.m.alert(h.clock.t) == Alert.SWAP_SOON
++
++
++def test_offline_after_a_minute_without_headset():
++    h = Harness(offline_after_s=60.0)
++    h.run(30.0, dt=0.5)
++    assert h.m.alert(h.clock.t) == Alert.OK
++    h.run(31.0, dt=0.5)
++    assert h.m.alert(h.clock.t) == Alert.OFFLINE
++    assert h.snap["headline"].startswith("Offline")
++
++
++def test_auto_adopt_only_with_one_registered_headset_in_range():
++    h = Harness(auto_adopt_after_s=30.0)
++    h.run(40.0, dt=0.5)
++    assert h.m.phase == Phase.NO_HEADSET  # A and B both on: do not guess
++    h.driver.switched_on.discard("Muse-BBBB")
++    h.run(25.0, dt=0.5)
++    assert h.m.phase == Phase.ACTIVE
++    assert h.m.current == "A" and h.m.auto_adopted
++
++
++def test_registry_config(tmp_path):
++    p = tmp_path / "c.toml"
++    p.write_text('[source]\nkind = "muse_direct"\n[headsets]\nregistry = ["A=Muse-41D2", "B = Muse-0C3A"]\n')
++    cfg = load_config([p])
++    assert cfg.headsets.entries() == [("A", "Muse-41D2"), ("B", "Muse-0C3A")]
++    for bad in ('["Muse-41D2"]', '["A=Muse-1", "A=Muse-2"]', '["A=Muse-1", "B=Muse-1"]'):
++        p.write_text(f"[headsets]\nregistry = {bad}\n")
++        with pytest.raises(ConfigError):
++            load_config([p])
++
++
++def test_status_page_serves_status_and_takes_commands():
++    from neurocinema.statuspage import StatusPage
++
++    h = Harness()
++    page = StatusPage(h.m, "127.0.0.1", 0)
++    page.start()
++    try:
++        status = json.load(urllib.request.urlopen(page.address + "/api/status", timeout=5))
++        assert status["phase"] == "no_headset"
++        html = urllib.request.urlopen(page.address + "/", timeout=5).read()
++        assert b"Neurocinema status" in html
++        req = urllib.request.Request(page.address + "/api/select", data=b'{"label": "B"}',
++                                     headers={"Content-Type": "application/json"})
++        assert json.load(urllib.request.urlopen(req, timeout=5)) == {"ok": True}
++        bad = urllib.request.Request(page.address + "/api/select", data=b'{"label": "Z"}')
++        with pytest.raises(urllib.error.HTTPError):
++            urllib.request.urlopen(bad, timeout=5)
++    finally:
++        page.close()
++    h.run(1.0)
++    assert h.m.current == "B"
++
++
++def test_threaded_worker_end_to_end():
++    """Real thread, real time, simulated headsets: the engine sees samples."""
++    import time
++
++    driver = FakeDriver({"Muse-AAAA": 90.0}, lifted_after_s=0.3)
++    worker = BleWorker(driver)
++    m = HeadsetManager(HeadsetsConfig(registry=["A=Muse-AAAA"]), worker)
++    try:
++        m.submit("select", "A")
++        got = []
++        deadline = time.monotonic() + 5.0
++        while time.monotonic() < deadline and len(got) < 40:
++            got += m.poll()
++            time.sleep(0.02)
++        assert m.phase == Phase.ACTIVE
++        assert len(got) >= 40
++        assert m.connected()
++    finally:
++        m.close()
