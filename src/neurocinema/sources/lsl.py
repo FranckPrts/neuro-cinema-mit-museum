@@ -4,6 +4,10 @@ Stream discovery runs on a background thread so the main loop never blocks.
 When samples stop for `stale_after_s` the inlets are dropped and discovery
 starts again; this covers muselsl being restarted (new outlets) as well as
 streams published by something we do not manage.
+
+muselsl stamps the 3 samples of each Muse IMU packet with the same arrival
+time. `Retimer` spreads them back out (as `ble.MuselslDriver` does for
+`muse_direct`); otherwise `Fusion` drops 2 of every 3 samples as duplicates.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ try:  # where LostError lives moved between pylsl versions
 except ImportError:  # pragma: no cover
     LostError = getattr(pylsl, "LostError", RuntimeError)
 
+from ..ble import IMU_RATE_HZ
 from ..config import MuseConfig
 from ..samples import ImuSample
 from .base import RateMeter
@@ -31,6 +36,62 @@ _KINDS = {"ACC": "acc", "GYRO": "gyro"}
 FIRST_DATA_GRACE_S = 5.0
 
 
+class Retimer:
+    """Makes one stream's timestamps strictly increasing.
+
+    A run of samples sharing a timestamp T (one muselsl packet) is spread back
+    over 1 / rate steps so its last sample lands on T. If that would reach back
+    to or before the previous sample (packets that arrived in a burst), the run
+    is spread evenly over the time since the previous sample instead. Samples
+    with distinct timestamps pass through unchanged.
+
+    A run's length is taken as the larger of what this pull holds and the
+    length of the previous complete run, so a packet split across two pulls
+    gets the same times as if it had arrived whole.
+    """
+
+    def __init__(self, rate_hz: float = IMU_RATE_HZ):
+        self.dt = 1.0 / rate_hz
+        self.clear()
+
+    def clear(self) -> None:
+        self._last: float | None = None  # last time handed out
+        self._run_t: float | None = None  # raw stamp of the current run
+        self._run_k = 0  # samples of the current run handed out so far
+        self._run_start = 0.0
+        self._run_step = 0.0
+        self._size = 1  # length of the last complete run
+
+    def __call__(self, stamps: list[float]) -> list[float]:
+        out: list[float] = []
+        for i, ts in enumerate(stamps):
+            if ts != self._run_t:
+                self._start_run(ts, stamps, i)
+            t = self._run_start + self._run_k * self._run_step
+            self._run_k += 1
+            self._last = t
+            out.append(t)
+        return out
+
+    def _start_run(self, ts: float, stamps: list[float], i: int) -> None:
+        if self._run_t is not None:
+            self._size = self._run_k
+        here = 1
+        while i + here < len(stamps) and stamps[i + here] == ts:
+            here += 1
+        n = max(self._size, here)
+        start, step = ts - (n - 1) * self.dt, self.dt
+        last = self._last
+        if last is not None and start <= last:
+            if ts > last:  # burst: spread over the time since the previous sample
+                step = (ts - last) / n
+                start = last + step
+            else:  # stamp went back (or the previous run overshot): keep increasing
+                start = last + self.dt
+        self._run_t, self._run_k = ts, 0
+        self._run_start, self._run_step = start, step
+
+
 class LslImuSource:
     def __init__(self, cfg: MuseConfig):
         self.cfg = cfg
@@ -41,6 +102,7 @@ class LslImuSource:
         self._opened_at: float | None = None
         self._last_receive: float | None = None
         self._rate = RateMeter()
+        self._retimers = {stype: Retimer() for stype in _KINDS}
         self._want = threading.Event()
         self._want.set()
         self._stop = threading.Event()
@@ -61,6 +123,7 @@ class LslImuSource:
                 self._opened_at = now
                 self._last_receive = None
                 self._rate.clear()
+                self._clear_retimers()
         if self._inlets is None:
             return []
 
@@ -73,7 +136,7 @@ class LslImuSource:
                 log.warning("LSL %s stream lost", stype)
                 self.reset()
                 return []
-            for values, ts in zip(data, stamps, strict=True):
+            for values, ts in zip(data, self._retimers[stype](stamps), strict=True):
                 samples.append(ImuSample(ts, kind, values[0], values[1], values[2]))
                 if kind == "gyro":
                     self._rate.add(now)
@@ -114,6 +177,7 @@ class LslImuSource:
         self._opened_at = None
         self._last_receive = None
         self._rate.clear()
+        self._clear_retimers()
         self._want.set()
 
     def close(self) -> None:
@@ -123,6 +187,10 @@ class LslImuSource:
         self._inlets = None
 
     # --- discovery ----------------------------------------------------------------
+
+    def _clear_retimers(self) -> None:
+        for retimer in self._retimers.values():
+            retimer.clear()
 
     def _close_inlets(self) -> None:
         if self._inlets:
