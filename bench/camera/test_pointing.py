@@ -87,3 +87,94 @@ def test_selector_survives_short_dropouts():
     assert sel.highlight == "middle"
     sel.update(0.9, None)
     assert sel.highlight is None
+
+
+# --- top/bottom halves (panels.py) ---
+
+import room_geometry as rg  # noqa: E402
+from panels import PanelMapper  # noqa: E402
+
+
+def mapper(**kw):
+    return PanelMapper(rg.load_room(None), **kw)
+
+
+def test_front_screen_halves():
+    m = mapper()
+    mid = m.midline_pitch("front", rg.hit(m.cfg, 0, 0)["point"])
+    assert -3 < mid < 1          # divider of a 10 ft screen is near eye height
+    assert m(0, 10) == "middle/top"
+    assert mapper()(0, -10) == "middle/bottom"
+    assert mapper()(0, 30) is None   # above the screen: ceiling
+
+
+def test_side_screen_halves():
+    assert mapper()(60, 15) == "right/top"
+    assert mapper()(-60, -20) == "left/bottom"
+
+
+def test_dead_band_holds_the_half():
+    m = mapper(band_deg=4.0)
+    mid = m.midline_pitch("front", rg.hit(m.cfg, 0, 0)["point"])
+    assert m(0, mid + 5) == "middle/top"
+    assert m(0, mid - 1.5) == "middle/top"      # inside the band: stays top
+    assert m(0, mid - 2.5) == "middle/bottom"   # past the band
+    assert m(0, mid + 1.5) == "middle/bottom"   # inside the band: stays bottom
+    assert m(0, mid + 2.5) == "middle/top"
+
+
+def test_halves_off():
+    assert mapper(halves=False)(0, -10) == "middle"
+
+
+def test_arm_pointing_up_and_down():
+    up = arm_aim(body(right_wrist=(-0.18, -0.7, -0.55)))      # forward, a little up
+    down = arm_aim(body(right_wrist=(-0.18, -0.5, -0.6)))     # forward, level with the shoulder
+    assert up.pitch > 3 and down.pitch < -8
+    assert mapper()(up.yaw, up.pitch) == "middle/top"
+    assert mapper()(down.yaw, down.pitch) == "middle/bottom"
+
+
+def test_selector_with_halves():
+    from pointing import Aim
+    sel = Selector(mapper(), smooth_s=0, hold_s=0.1, dwell_s=0.5)
+    ev = []
+    for i in range(80):
+        t = i * 0.02
+        ev += sel.update(t, Aim(0, 10 if t < 0.5 else -10, "right arm", 1))
+    assert ("highlight", "middle/top") in ev and ("highlight", "middle/bottom") in ev
+    assert ("select", "middle/bottom") in ev
+
+
+# --- camera position (camera_pose.py) ---
+
+from camera_pose import CameraConfigError, load_camera, pose_from_points  # noqa: E402
+
+
+def test_camera_forward_matches_cam_to_room():
+    """The camera's own forward axis, turned into the room, points at the aim point."""
+    for pos in [(0, 1.3, -0.6), (2.45, 2.5, -4.36), (-2.45, 2.5, -4.36), (2.45, 1.0, 0.5)]:
+        aim = (0.0, 1.3, 0.0)
+        pose = pose_from_points(pos, aim)
+        f = cam_to_room((0, 0, 1), pose.bearing_deg, pose.tilt_deg)
+        want = [a - p for a, p in zip(aim, pos)]
+        n = sum(c * c for c in want) ** 0.5
+        assert f == pytest.approx([c / n for c in want], abs=1e-9)
+
+
+def test_front_right_corner_numbers():
+    pose = pose_from_points((2.45, 2.5, -4.36), (0, 1.3, 0))
+    assert pose.bearing_deg == pytest.approx(29.3, abs=0.2)
+    assert pose.tilt_deg == pytest.approx(13.5, abs=0.5)
+
+
+def test_default_camera_file_is_a_level_desk_camera():
+    pose = load_camera(HERE / "camera.toml")
+    assert pose.bearing_deg == pytest.approx(0) and pose.tilt_deg == pytest.approx(0)
+
+
+def test_camera_file_rejects_typos(tmp_path):
+    p = tmp_path / "c.toml"
+    p.write_text("[camera]\nx = 1\n")
+    with pytest.raises(CameraConfigError):
+        load_camera(p)
