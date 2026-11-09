@@ -45,6 +45,7 @@ sys.path.insert(0, str(HERE))
 
 import room_geometry as rg  # noqa: E402
 from camera_pose import CameraConfigError, load_camera  # noqa: E402
+from osc_out import CamOsc  # noqa: E402
 from panels import PanelMapper, screen_part  # noqa: E402
 from pointing import Aim, Selector, arm_aim, head_aim  # noqa: E402
 
@@ -195,7 +196,8 @@ def main(argv=None) -> int:
                     help="deg added to the arm's pitch (the c key sets this live and prints it)")
     ap.add_argument("--calib-delay", type=float, default=5.0,
                     help="seconds between pressing c and the calibration sample, to step into place")
-    ap.add_argument("--osc", default=None, help="host:port to send /nc/cam/* to (off by default)")
+    ap.add_argument("--osc", default=None,
+                    help="host:port to send /nc/cam/* to, in the engine's message format (off by default)")
     ap.add_argument("--log", type=Path, default=None, help="write one CSV row per frame here")
     ap.add_argument("--no-mirror", action="store_true", help="show the image unmirrored")
     ap.add_argument("--width", type=int, default=1280)
@@ -226,7 +228,8 @@ def main(argv=None) -> int:
     if args.osc:
         from pythonosc.udp_client import SimpleUDPClient
         host, port = args.osc.rsplit(":", 1)
-        osc = SimpleUDPClient(host, int(port))
+        client = SimpleUDPClient(host, int(port))
+        osc = CamOsc(lambda address, *a: client.send_message(address, list(a)), t0=0.0)
 
     log_f = log_w = None
     if args.log:
@@ -299,10 +302,9 @@ def main(argv=None) -> int:
 
             sm = selector.aim()
             if osc:
-                if sm:
-                    osc.send_message("/nc/cam/aim", [float(sm[0]), float(sm[1])])
-                for kind, scr in events:
-                    osc.send_message(f"/nc/cam/{kind}", scr or "none")
+                osc.calib = (*cam.position, *cam.aim, bearing, tilt, cfg["room"]["eye_height_m"],
+                             args.split, pitch_offset)
+                osc.frame(t, sm, events, selector.highlight, selector.dwell(t), selector._selected)
             for kind, scr in events:
                 print(f"{t:8.2f}s  {kind:9s} {scr}")
 
@@ -413,6 +415,8 @@ def main(argv=None) -> int:
         cap.release()
         landmarker.close()
         cv2.destroyAllWindows()
+        if osc:
+            osc.close()
         if log_f:
             log_f.close()
     return 0

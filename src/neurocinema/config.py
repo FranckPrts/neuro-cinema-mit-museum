@@ -193,6 +193,7 @@ class TargetsConfig:
     # Set by load_config from the room (not a config key): (left outer end,
     # left|middle, middle|right, right outer end), degrees.
     column_bounds: ClassVar[tuple[float, float, float, float] | None] = None
+    room_hash: ClassVar[str] = ""  # first 12 hex digits of the room file's SHA-1
 
     def bounds(self) -> tuple[float, float, float, float]:
         if self.column_bounds is not None:
@@ -407,6 +408,8 @@ def apply_room_file(t: TargetsConfig) -> None:
         path = _REPO_ROOT / path
     if not path.exists():
         raise ConfigError(f"targets.room_file: {t.room_file} not found (or set targets.from_room = false)")
+    import hashlib
+
     try:
         layout = screen_layout(load_room(path))
     except RoomError as e:
@@ -415,3 +418,4 @@ def apply_room_file(t: TargetsConfig) -> None:
     t.middle_yaw_deg = layout.centre["middle"]
     t.right_yaw_deg = layout.centre["right"]
     t.column_bounds = layout.bounds
+    t.room_hash = hashlib.sha1(path.read_bytes()).hexdigest()[:12]

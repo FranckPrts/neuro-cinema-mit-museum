@@ -78,6 +78,11 @@ class Engine:
         self._reset_still_since: float | None = None
         self._next_pose = 0.0
         self._next_snapshot = 0.0
+        # For /calib/imu: when calibration happened, yaw corrected since, clipped samples then.
+        self._calib_t: float | None = None
+        self._yaw_corrected = 0.0
+        self._clipped_at_calib = 0
+        self._next_calib = 0.0
 
     # --- inputs -------------------------------------------------------------
 
@@ -153,6 +158,9 @@ class Engine:
             self._next_snapshot = now + 1.0 / self.cfg.osc.snapshot_rate_hz
             self.emit_snapshot()
 
+        if now >= self._next_calib:
+            self.emit_calibration(now)
+
     def on_connection(self, connected: bool, now: float, headset: str | None = None) -> None:
         """Data started or stopped. `headset` identifies the headset (None = unknown)."""
         if connected == self.connected:
@@ -202,6 +210,7 @@ class Engine:
             self.out.send(f"{self.p}/pong", *args)
         elif name == "snapshot":
             self.emit_snapshot()
+            self.emit_calibration(now)
         else:
             log.warning("unknown command %r", name)
 
@@ -240,10 +249,14 @@ class Engine:
         log.info("calibrated: bias=%s deg/s (from %s)",
                  np.round(self.fusion.bias, 2).tolist(), self.fusion.bias_source)
         self.targets.reset()
+        self._calib_t, self._yaw_corrected = t, 0.0
+        self._clipped_at_calib = self.fusion.clipped_samples
         self._event("calibrated")
+        self.emit_calibration(t)
         self._set_state(State.ACTIVE, t, "calibrated")
 
     def _apply_reset(self, now: float, why: str) -> None:
+        self._yaw_corrected += abs(self.fusion.yaw_deg)
         self.fusion.zero_yaw()
         self._clear_target()
         log.info("yaw zeroed (%s)", why)
@@ -274,7 +287,9 @@ class Engine:
 
     def _select(self, target: Target, t: float) -> None:
         centre = self.targets.column_centre(target.column)
+        before = self.fusion.yaw_deg
         self.fusion.reanchor_yaw(centre, self.cfg.interaction.reanchor_gain)
+        self._yaw_corrected += abs(self.fusion.yaw_deg - before)
         log.info("selected %s", target)
         self.out.send(f"{self.p}/selected", target.column, target.row)
         self._event("selected", target.column, target.row)
@@ -329,6 +344,29 @@ class Engine:
         if self.state == State.ACTIVE:
             dwell = self.targets.dwell(now) / max(self.cfg.interaction.min_dwell_s, 1e-6)
             self.out.send(f"{self.p}/dwell", round(min(1.0, dwell), 3))
+
+    CALIB_EVERY_S = 5.0
+
+    def emit_calibration(self, now: float) -> None:
+        """What calibration set, for the viewer (on calibration and every 5 s).
+
+        /calib/imu  backend bias_source bias_dps since_s yaw_corrected_deg clipped
+          since_s = -1 before calibration; yaw_corrected_deg = |re-anchoring| +
+          |shake resets| since calibration (large = the yaw drifted);
+          clipped = gyro samples at full scale since calibration.
+        /calib/room  from_room room_hash left middle right lo left|middle middle|right hi
+          screen centres and column bounds in degrees; room_hash = the room
+          file's first 12 hex digits of SHA-1 ("" when from_room = 0).
+        """
+        self._next_calib = now + self.CALIB_EVERY_S
+        f, t = self.fusion, self.cfg.targets
+        since = -1.0 if self._calib_t is None or not f.calibrated else round(now - self._calib_t, 1)
+        self.out.send(f"{self.p}/calib/imu", self.cfg.imu.backend, f.bias_source,
+                      round(float(np.linalg.norm(f.bias)), 3), since, round(self._yaw_corrected, 1),
+                      int(f.clipped_samples - self._clipped_at_calib) if since >= 0 else 0)
+        self.out.send(f"{self.p}/calib/room", int(t.from_room), t.room_hash,
+                      *(round(v, 2) for v in (t.left_yaw_deg, t.middle_yaw_deg, t.right_yaw_deg)),
+                      *(round(v, 2) for v in t.bounds()))
 
     def emit_snapshot(self) -> None:
         """Re-send the latest discrete values, so a late-starting TD catches up."""

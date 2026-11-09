@@ -182,6 +182,8 @@ Engine → TouchDesigner (default `127.0.0.1:7000`):
 | `/nc/calibration` | 0.0 to 1.0 | 30 Hz in `calibrating` |
 | `/nc/pose` | yaw, pitch, roll (degrees) | 30 Hz while tracking. + = right / up / right ear down |
 | `/nc/event` | name [args] | `engine_started`, `engine_stopped`, `calibrated`, `calibration_slow`, `nod`, `shake`, `reset`, `selected <col> <row>`, `nod_ignored <watching\|no_target\|dwell>` |
+| `/nc/calib/imu` | backend, bias_source (`idle` `worn` `vqf` `none`), bias_dps (float), since_s (float, -1 = not calibrated), yaw_corrected_deg (float: re-anchoring + shake resets since calibration; large = drift), clipped (int: gyro samples at full scale since calibration) | on calibration, `/cmd/snapshot`, and every 5 s |
+| `/nc/calib/room` | from_room (0/1), room_hash (string), left, middle, right screen centre yaws, then column bounds lo, left\|middle, middle\|right, hi (degrees) | same |
 
 TouchDesigner → engine (default `127.0.0.1:7001`):
 

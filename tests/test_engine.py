@@ -266,3 +266,21 @@ def test_full_flow_with_the_vqf_backend():
     rig.run(3.0)
     assert rig.out.events("reset")
     assert abs(rig.engine.fusion.yaw_deg) < 3
+
+
+def test_calibration_is_reported_for_the_viewer():
+    rig = Rig(seed=8)
+    rig.run(0.5)
+    imu = rig.out.last("/calib/imu")
+    assert imu[:2] == ("complementary", "none") and imu[3] == -1.0  # not calibrated yet
+    rig.start_session()
+    backend, source, bias, since, corrected, clipped = rig.out.last("/calib/imu")
+    assert source in ("idle", "worn") and 0.5 < bias < 3 and 0 <= since < 1 and corrected == 0 and clipped == 0
+    rig.head.look(yaw=40, pitch=10)
+    rig.run(1.5)
+    rig.engine.fusion.yaw_deg += 6  # drift
+    rig.head.nod(rig.t)
+    rig.run(6.0)  # selection re-anchors; /calib/imu repeats every 5 s
+    assert rig.out.last("/calib/imu")[4] > 1
+    room = rig.out.last("/calib/room")
+    assert room[0] == 1 and len(room) == 9  # Config() defaults: from_room, but no room file loaded
