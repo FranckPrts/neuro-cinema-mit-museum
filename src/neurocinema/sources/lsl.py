@@ -169,6 +169,10 @@ class LslImuSource:
     def rate_hz(self) -> float:
         return self._rate.rate(self.now())
 
+    def headset_id(self) -> str | None:
+        # muselsl names its outlets' source_id "Muse" + headset address.
+        return self._source_id or None
+
     def reset(self) -> None:
         with self._lock:
             self._pending = None

@@ -70,6 +70,7 @@ class Engine:
         self.state = State.DISCONNECTED
         self.state_since = 0.0
         self.connected = False
+        self.headset: str | None = None  # identity of the connected headset, if the source knows it
         self._resume_session = False
         self._calibration_slow_sent = False
         self._idle_still_since: float | None = None
@@ -152,7 +153,8 @@ class Engine:
             self._next_snapshot = now + 1.0 / self.cfg.osc.snapshot_rate_hz
             self.emit_snapshot()
 
-    def on_connection(self, connected: bool, now: float) -> None:
+    def on_connection(self, connected: bool, now: float, headset: str | None = None) -> None:
+        """Data started or stopped. `headset` identifies the headset (None = unknown)."""
         if connected == self.connected:
             return
         self.connected = connected
@@ -160,8 +162,13 @@ class Engine:
             self._resume_session = self.state in _SESSION
             self._set_state(State.DISCONNECTED, now, "no data from headset")
             return
-        # The gap invalidates orientation and bias: start again from scratch.
-        self.fusion.reset()
+        # The gap invalidates the orientation: start again. The bias learned
+        # off the head belongs to the headset, so it survives if it is the same one.
+        same = headset is not None and headset == self.headset
+        if headset != self.headset:
+            log.info("headset %s -> %s", self.headset or "?", headset or "?")
+        self.headset = headset
+        self.fusion.reset(keep_idle_bias=same)
         self.nod.reset()
         self.shake.reset()
         if self._resume_session:
@@ -206,6 +213,7 @@ class Engine:
         log.info("state %s -> %s (%s)", self.state.value, new.value, reason)
         self.state = new
         self.state_since = now
+        self.fusion.learn_idle_bias = new == State.IDLE
         if new == State.CALIBRATING:
             self.calibrator.reset()
             self._calibration_slow_sent = False
@@ -229,7 +237,8 @@ class Engine:
             log.warning("calibration rejected: %s", e)
             self.calibrator.reset()
             return
-        log.info("calibrated: bias=%s deg/s", np.round(self.fusion.bias, 2).tolist())
+        log.info("calibrated: bias=%s deg/s (from %s)",
+                 np.round(self.fusion.bias, 2).tolist(), self.fusion.bias_source)
         self.targets.reset()
         self._event("calibrated")
         self._set_state(State.ACTIVE, t, "calibrated")

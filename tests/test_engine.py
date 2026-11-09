@@ -1,5 +1,8 @@
+import numpy as np
+
 from neurocinema.config import Config
 from neurocinema.engine import State
+from neurocinema.sim.head import VirtualHead
 
 from helpers import Rig
 
@@ -165,3 +168,60 @@ def test_nod_right_after_looking_up_never_selects_the_previous_row():
     rig.head.nod(rig.t)
     rig.run(1.0)
     assert ("middle", "bottom") not in [s for s in rig.out.events("selected")]
+
+
+def _on_the_stand_then_worn(rig: Rig, stand_s: float = 15.0) -> None:
+    rig.head.set_worn(False, rig.t)
+    rig.run(stand_s)
+    assert rig.state == State.IDLE
+    rig.head.set_worn(True, rig.t)
+    rig.run(1.6)
+    assert rig.state == State.CALIBRATING
+    rig.run(3.5)
+    assert rig.state == State.ACTIVE
+
+
+def test_bias_learned_on_the_stand_is_used_at_calibration():
+    rig = Rig(head=VirtualHead(seed=13, worn=False))
+    _on_the_stand_then_worn(rig)
+    assert rig.engine.fusion.bias_source == "idle"
+    assert np.linalg.norm(rig.engine.fusion.bias - rig.head.bias) < 0.15
+
+
+def test_bias_is_learned_only_while_idle():
+    rig = Rig(seed=14)
+    rig.run(1.0)
+    assert rig.state == State.IDLE
+    assert rig.engine.fusion.learn_idle_bias
+    rig.engine.command("start", (), rig.t)
+    assert rig.state == State.CALIBRATING
+    assert not rig.engine.fusion.learn_idle_bias
+
+
+def test_stand_bias_survives_a_dropout_of_the_same_headset_only():
+    rig = Rig(head=VirtualHead(seed=15, worn=False))
+    rig.headset = "A"
+    rig.run(10.0)
+    assert rig.engine.fusion.idle_bias() is not None
+    rig.drop()
+    rig.run(1.0)
+    rig.streaming = True
+    rig.run(0.5)
+    assert rig.state == State.IDLE
+    assert rig.engine.fusion.idle_bias() is not None  # same headset: kept
+    rig.drop()
+    rig.run(1.0)
+    rig.headset = "B"
+    rig.streaming = True
+    rig.run(0.5)
+    assert rig.engine.fusion.idle_bias() is None  # another headset: dropped
+
+
+def test_stand_bias_is_dropped_when_the_headset_is_unknown():
+    rig = Rig(head=VirtualHead(seed=16, worn=False))
+    rig.run(10.0)
+    rig.drop()
+    rig.run(1.0)
+    rig.streaming = True
+    rig.run(0.5)
+    assert rig.engine.fusion.idle_bias() is None

@@ -128,6 +128,14 @@ class ImuConfig:
     max_bias_dps: float = 20.0
     # While still, stop integrating yaw (zero-velocity update).
     freeze_yaw_when_still: bool = True
+    # Gyro bias learned while the headset lies still off the head (engine idle):
+    # a running mean over `idle_bias_tau_s`, usable after `idle_bias_min_s` of
+    # stillness. Calibration uses it instead of the 2 s worn mean if it is
+    # younger than `idle_bias_max_age_s` (0 = off) and within
+    # `bias_update_max_dps` of that mean. Kept across a dropout of the same headset.
+    idle_bias_tau_s: float = 10.0
+    idle_bias_min_s: float = 5.0
+    idle_bias_max_age_s: float = 600.0
 
 
 @dataclass

@@ -79,9 +79,11 @@ def test_switching_headsets_without_restart():
     h = Harness()
     h.use("A")
     assert h.m.phase == Phase.ACTIVE
+    assert h.m.headset_id() == "A"
     h.use("B")
     assert h.m.phase == Phase.ACTIVE
     assert h.m.current == "B"
+    assert h.m.headset_id() == "B"  # the engine drops what it learned about A
     assert h.driver._name == "Muse-BBBB"
 
 
@@ -107,6 +109,7 @@ def test_lost_link_reconnects_the_same_headset():
     h.run(3.0)
     assert h.m.phase == Phase.ACTIVE
     assert h.m.current == "A"
+    assert h.m.headset_id() == "A"  # same headset: the engine keeps its idle bias
 
 
 def test_failed_connects_give_up_with_a_message():

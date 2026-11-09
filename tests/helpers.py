@@ -37,6 +37,7 @@ class Rig:
         self.head = head or VirtualHead(seed=seed)
         self.t = 0.0
         self.streaming = True
+        self.headset: str | None = None  # what the source reports as headset identity
 
     def run(self, seconds: float) -> None:
         dt = 1.0 / RATE_HZ
@@ -45,7 +46,7 @@ class Rig:
             self.out.clock = self.t
             if self.streaming:
                 if not self.engine.connected:
-                    self.engine.on_connection(True, self.t)
+                    self.engine.on_connection(True, self.t, headset=self.headset)
                 acc, gyro = self.head.step(self.t)
                 self.engine.process(ImuSample(self.t, "acc", *acc))
                 self.engine.process(ImuSample(self.t, "gyro", *gyro))

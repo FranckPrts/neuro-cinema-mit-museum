@@ -12,10 +12,16 @@ Conventions, after calibration:
 rotates it, the accelerometer slowly pulls it back. Yaw is integrated about that
 vector, so it is correct however the band sits on the head, and the head's
 forward/left axes are fixed at calibration from the configured forward axis.
+
+Gyro bias: while the engine is idle (headset off the head) and the headset is
+still, a long running mean of the raw gyro is kept ("idle bias"). Calibration
+starts from it instead of the 2 s worn mean, which postural sway or a slow turn
+can spoil.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
 
@@ -23,6 +29,8 @@ import numpy as np
 
 from .config import ImuConfig
 from .samples import ImuSample
+
+log = logging.getLogger(__name__)
 
 _AXES = {
     "x": (1.0, 0.0, 0.0), "-x": (-1.0, 0.0, 0.0),
@@ -139,12 +147,22 @@ class Fusion:
         self.cfg = cfg
         self._forward_axis = np.array(_AXES[cfg.forward_axis])
         self.stillness = Stillness(cfg.still_window_s, cfg.still_gyro_range_dps, cfg.still_acc_range_g)
+        # Set by the engine while the headset is not worn (IDLE): learn the
+        # gyro bias whenever it is still.
+        self.learn_idle_bias = False
+        self._forget_idle_bias()
         self.reset()
 
-    def reset(self) -> None:
-        """Forget everything (used after a dropout or a headset change)."""
+    def reset(self, keep_idle_bias: bool = False) -> None:
+        """Forget the orientation (used after a dropout or a headset change).
+
+        `keep_idle_bias`: keep the bias learned off the head (same headset).
+        """
+        if not keep_idle_bias:
+            self._forget_idle_bias()
         self.up: np.ndarray | None = None  # world up, in sensor coordinates
         self.bias = np.zeros(3)
+        self.bias_source = "none"  # where the calibration bias came from: "idle" or "worn"
         self.calibrated = False
         self._up0: np.ndarray | None = None
         self._fwd: np.ndarray | None = None  # head forward, sensor coordinates
@@ -191,8 +209,11 @@ class Fusion:
         self.yaw_rate = yaw_rate
         self.pitch_rate = pitch_rate
 
+        still = self.stillness.is_still()
+        if still and self.learn_idle_bias:
+            self._learn_idle_bias(t, w, dt)
         frozen = False
-        if self.calibrated and self.stillness.is_still():
+        if self.calibrated and still:
             mean = self.stillness.gyro_mean()
             if mean is not None and np.linalg.norm(mean - self.bias) < self.cfg.bias_update_max_dps:
                 k = dt / (self.cfg.bias_tau_s + dt)
@@ -230,10 +251,55 @@ class Fusion:
             return None
         return np.cross(self.up, _unit(fwd))
 
+    # --- gyro bias learned off the head ---------------------------------------
+
+    def _forget_idle_bias(self) -> None:
+        self._idle_bias: np.ndarray | None = None
+        self._idle_bias_t: float | None = None  # last update, sample clock
+        self._idle_still_s = 0.0  # stillness accumulated into it
+
+    def _learn_idle_bias(self, t: float, w: np.ndarray, dt: float) -> None:
+        # A plain mean at first, then an exponential one over idle_bias_tau_s.
+        self._idle_still_s += dt
+        k = dt / min(self._idle_still_s, self.cfg.idle_bias_tau_s)
+        prev = w if self._idle_bias is None else self._idle_bias
+        self._idle_bias = prev + k * (w - prev)
+        self._idle_bias_t = t
+
+    def idle_bias(self) -> np.ndarray | None:
+        """The bias learned off the head, or None if there is none usable now."""
+        c = self.cfg
+        if (c.idle_bias_max_age_s <= 0 or self._idle_bias is None or self._idle_bias_t is None
+                or self._t_gyro is None or self._idle_still_s < c.idle_bias_min_s):
+            return None
+        if self._t_gyro - self._idle_bias_t > c.idle_bias_max_age_s:
+            return None
+        if np.linalg.norm(self._idle_bias) > c.max_bias_dps:
+            return None
+        return self._idle_bias.copy()
+
+    def _calibration_bias(self, worn_mean: np.ndarray) -> tuple[np.ndarray, str]:
+        """The bias to start tracking with, and where it came from."""
+        idle = self.idle_bias()
+        if idle is None:
+            return worn_mean.copy(), "worn"
+        # Further apart than the in-session update can correct: the headset was
+        # power-cycled, or the head was turning. Today's behaviour is the safe side.
+        diff = float(np.linalg.norm(idle - worn_mean))
+        if diff >= self.cfg.bias_update_max_dps:
+            log.warning("idle gyro bias is %.1f deg/s away from the worn mean; using the worn mean", diff)
+            return worn_mean.copy(), "worn"
+        return idle, "idle"
+
     # --- calibration and corrections ----------------------------------------
 
     def calibrate(self, gyro_mean: np.ndarray, acc_mean: np.ndarray) -> None:
-        """Define the neutral pose: looking at the centre of the middle screen."""
+        """Define the neutral pose: looking at the centre of the middle screen.
+
+        `gyro_mean` / `acc_mean` are averaged over the calibration stillness.
+        The bias starts from the idle bias when there is a usable one.
+        """
+        gyro_mean = np.asarray(gyro_mean, dtype=float)
         if np.linalg.norm(gyro_mean) > self.cfg.max_bias_dps:
             raise CalibrationError(
                 f"gyro bias {np.linalg.norm(gyro_mean):.1f} deg/s is implausible (head was moving?)"
@@ -245,7 +311,7 @@ class Fusion:
                 "the configured forward axis is nearly vertical; check imu.forward_axis"
             )
         fwd = _unit(fwd)
-        self.bias = np.asarray(gyro_mean, dtype=float).copy()
+        self.bias, self.bias_source = self._calibration_bias(gyro_mean)
         self.up = up
         self._up0 = up
         self._fwd = fwd

@@ -22,6 +22,12 @@ class ImuSource(Protocol):
     def rate_hz(self) -> float:
         """Recent gyro sample rate."""
 
+    def headset_id(self) -> str | None:
+        """Which physical headset the samples come from, or None if unknown.
+
+        The engine keeps what it learned about a headset (its gyro bias)
+        across a dropout only if this is unchanged."""
+
     def reset(self) -> None:
         """Drop the current connection and look for the stream again."""
 

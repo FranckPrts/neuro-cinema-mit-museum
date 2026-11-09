@@ -64,7 +64,7 @@ class App:
         now = source.now()
         connected = source.connected()
         if connected != self.engine.connected:
-            self.engine.on_connection(connected, now)
+            self.engine.on_connection(connected, now, headset=source.headset_id() if connected else None)
         if self.supervisor:
             self.supervisor.tick(connected)
         if self.commands:

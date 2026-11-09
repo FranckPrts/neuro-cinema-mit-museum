@@ -59,6 +59,9 @@ bias_tau_s = 8.0
 bias_update_max_dps = 2.0
 max_bias_dps = 20.0
 freeze_yaw_when_still = true
+idle_bias_tau_s = 10.0        # gyro bias learned while the headset lies still off the head (idle)...
+idle_bias_min_s = 5.0         # ...usable after this much stillness...
+idle_bias_max_age_s = 600.0   # ...and used at calibration while younger than this (0 = off)
 
 [calibration]
 still_s = 2.0                 # stillness needed, looking at the centre of the middle screen

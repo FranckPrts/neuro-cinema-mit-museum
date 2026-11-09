@@ -146,6 +146,10 @@ the default.
 - Each selection pulls yaw halfway back to that screen's centre, so drift
   rarely builds up. The shake is the visitor's manual fix.
 - Pitch (top/bottom) is measured against gravity and does not drift.
+- While the headset lies still on its stand (`idle`), the engine learns the
+  gyro bias. Calibration starts from it, so a visitor who sways or drifts a
+  little during "keep still" doesn't spoil it. It is kept across a dropout of
+  the same headset and dropped when the headset changes (`imu.idle_bias_*`).
 
 ## OSC reference
 

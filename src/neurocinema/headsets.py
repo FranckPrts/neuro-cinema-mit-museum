@@ -158,6 +158,9 @@ class HeadsetManager:
     def rate_hz(self) -> float:
         return self._rate.rate(self.clock())
 
+    def headset_id(self) -> str | None:
+        return self.current
+
     def reset(self) -> None:
         """`/nc/cmd/restart_stream`: reconnect the current headset."""
         self.submit("reconnect")

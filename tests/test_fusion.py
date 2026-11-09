@@ -90,3 +90,100 @@ def test_out_of_order_and_gapped_samples_do_not_corrupt_yaw():
     f.update(ImuSample(0.5, "gyro", 0, 0, -500))  # older: dropped
     f.update(ImuSample(3.0, "gyro", 0, 0, -500))  # after a 2 s gap: not integrated
     assert f.yaw_deg == 0.0
+
+
+# --- gyro bias learned while the headset lies still off the head ---------------
+
+
+def _table_then_worn(rig: FusionRig, table_s: float = 20.0) -> None:
+    """Headset on the table (engine idle), then put on; ready to calibrate."""
+    rig.f.learn_idle_bias = True
+    rig.run(table_s)
+    rig.f.learn_idle_bias = False
+    rig.head.set_worn(True, rig.t)
+    rig.run(1.6)  # put-on motion
+    rig.cal.reset()
+
+
+def test_idle_bias_is_learned_on_the_table():
+    head = VirtualHead(seed=20, worn=False, bias_walk_dps=0.0)
+    rig = FusionRig(head)
+    rig.f.learn_idle_bias = True
+    rig.run(30)
+    assert np.allclose(rig.f.idle_bias(), head.bias, atol=0.05)
+
+
+def test_idle_bias_is_not_used_until_enough_stillness():
+    rig = FusionRig(VirtualHead(seed=21, worn=False))
+    rig.f.learn_idle_bias = True
+    rig.run(rig.cfg.imu.idle_bias_min_s - 1.0)
+    assert rig.f.idle_bias() is None
+    rig.run(2.0)
+    assert rig.f.idle_bias() is not None
+
+
+def test_calibration_uses_the_idle_bias_while_the_head_turns_slowly():
+    head = VirtualHead(seed=22, worn=False)
+    rig = FusionRig(head)
+    _table_then_worn(rig)
+    # A slow drift of gaze during "keep still": still by the stillness test,
+    # but it spoils the 2 s worn mean by about 1 deg/s.
+    head.max_speed_dps = 1.0
+    head.look(yaw=30)
+    rig.calibrate()
+    worn_mean = rig.cal.result()[0]
+    assert np.linalg.norm(worn_mean - head.bias) > 0.5
+    assert rig.f.bias_source == "idle"
+    assert np.linalg.norm(rig.f.bias - head.bias) < 0.15
+
+
+def test_calibration_while_swaying_starts_from_the_idle_bias():
+    head = VirtualHead(seed=23, worn=False)
+    rig = FusionRig(head)
+    _table_then_worn(rig)
+    rig.calibrate()
+    assert rig.f.bias_source == "idle"
+    assert np.linalg.norm(rig.f.bias - head.bias) < 0.15
+
+
+def test_stale_idle_bias_is_not_used():
+    cfg = Config()
+    cfg.imu.idle_bias_max_age_s = 5.0
+    rig = FusionRig(VirtualHead(seed=24, worn=False), cfg)
+    _table_then_worn(rig)
+    rig.run(5.0)  # worn, too long after the table
+    rig.cal.reset()
+    rig.calibrate()
+    assert rig.f.bias_source == "worn"
+
+
+def test_idle_bias_off_when_max_age_is_zero():
+    cfg = Config()
+    cfg.imu.idle_bias_max_age_s = 0.0
+    rig = FusionRig(VirtualHead(seed=25, worn=False), cfg)
+    _table_then_worn(rig)
+    rig.calibrate()
+    assert rig.f.bias_source == "worn"
+
+
+def test_idle_bias_far_from_the_worn_mean_is_not_used():
+    head = VirtualHead(seed=26, worn=False)
+    rig = FusionRig(head)
+    _table_then_worn(rig)
+    head.bias = head.bias + np.array([0.0, 0.0, 3.0])  # e.g. power-cycled: bias moved
+    rig.calibrate()
+    assert rig.f.bias_source == "worn"
+    assert np.linalg.norm(rig.f.bias - head.bias) < 0.6
+
+
+def test_reset_keeps_the_idle_bias_only_when_asked():
+    rig = FusionRig(VirtualHead(seed=27, worn=False))
+    rig.f.learn_idle_bias = True
+    rig.run(10)
+    learned = rig.f.idle_bias()
+    rig.f.reset(keep_idle_bias=True)
+    rig.run(0.1)
+    assert np.allclose(rig.f.idle_bias(), learned, atol=0.05)
+    rig.f.reset()
+    rig.run(0.1)
+    assert rig.f.idle_bias() is None

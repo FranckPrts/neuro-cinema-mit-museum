@@ -48,6 +48,9 @@ class SimSource:
     def rate_hz(self) -> float:
         return self._rate.rate(self.now())
 
+    def headset_id(self) -> str | None:
+        return "sim"
+
     def reset(self) -> None:
         self._t_next = None
 
