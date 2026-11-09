@@ -21,7 +21,7 @@ def test_keys_drive_the_virtual_head():
 
     kb._handle("n", 1.0)
     kb._handle("h", 2.0)
-    assert [k for k, _ in head._gestures] == ["nod", "shake"]
+    assert [g[0] for g in head._gestures] == ["nod", "shake"]
 
     kb._handle("o", 3.0)
     assert not head.worn

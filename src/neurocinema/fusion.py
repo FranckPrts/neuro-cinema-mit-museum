@@ -27,7 +27,7 @@ from collections import deque
 
 import numpy as np
 
-from .config import ImuConfig
+from .config import ConfigError, ImuConfig
 from .samples import ImuSample
 
 log = logging.getLogger(__name__)
@@ -41,13 +41,31 @@ _AXES = {
 # A gap longer than this between two samples is a dropout, not a time step.
 MAX_DT_S = 0.25
 
+# The Muse gyro reads at most 245 deg/s per axis (16 bits at 0.0074768 deg/s).
+# A reading this close is clipped: the head turned faster and yaw lost the rest.
+GYRO_CLIP_DPS = 244.5
+# Clipped samples closer together than this are one burst (one log line).
+_CLIP_BURST_GAP_S = 0.5
+
 
 class CalibrationError(RuntimeError):
     pass
 
 
+# Small 3-vector helpers: np.cross and np.linalg.norm carry a lot of per-call
+# overhead, and these run on every sample.
+def _norm(v: np.ndarray) -> float:
+    return math.sqrt(float(v @ v))
+
+
+def _cross(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    a0, a1, a2 = a.tolist()
+    b0, b1, b2 = b.tolist()
+    return np.array((a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0))
+
+
 def _unit(v: np.ndarray) -> np.ndarray:
-    n = float(np.linalg.norm(v))
+    n = _norm(v)
     return v / n if n > 1e-9 else v
 
 
@@ -60,10 +78,12 @@ class Stillness:
         self.acc_range_g = acc_range_g
         self._gyro: deque[tuple[float, np.ndarray]] = deque()
         self._acc: deque[tuple[float, float]] = deque()
+        self._gyro_arr: np.ndarray | None = None  # the window as an array, until the next sample
 
     def clear(self) -> None:
         self._gyro.clear()
         self._acc.clear()
+        self._gyro_arr = None
 
     def _trim(self, dq: deque, t: float) -> None:
         while dq and dq[0][0] < t - self.window_s:
@@ -72,6 +92,12 @@ class Stillness:
     def add_gyro(self, t: float, w: np.ndarray) -> None:
         self._gyro.append((t, w))
         self._trim(self._gyro, t)
+        self._gyro_arr = None
+
+    def _gyro_window(self) -> np.ndarray:
+        if self._gyro_arr is None:
+            self._gyro_arr = np.array([w for _, w in self._gyro])
+        return self._gyro_arr
 
     def add_acc(self, t: float, norm: float) -> None:
         self._acc.append((t, norm))
@@ -84,13 +110,13 @@ class Stillness:
         """Largest per-axis peak-to-peak gyro over the window, deg/s."""
         if not self._covered(self._gyro):
             return None
-        g = np.array([w for _, w in self._gyro])
-        return float(np.max(np.ptp(g, axis=0)))
+        g = self._gyro_window()
+        return float((g.max(axis=0) - g.min(axis=0)).max())
 
     def gyro_mean(self) -> np.ndarray | None:
         if not self._gyro:
             return None
-        return np.mean([w for _, w in self._gyro], axis=0)
+        return self._gyro_window().mean(axis=0)
 
     def is_still(self) -> bool:
         g = self.gyro_range()
@@ -143,6 +169,12 @@ class Calibrator:
 
 
 class Fusion:
+    """Complementary-filter backend; also the shared logic for other backends."""
+
+    # False when the backend estimates the gyro bias itself (VQF): then the
+    # idle-bias learning and the still-time bias update are skipped.
+    _own_bias = True
+
     def __init__(self, cfg: ImuConfig):
         self.cfg = cfg
         self._forward_axis = np.array(_AXES[cfg.forward_axis])
@@ -150,6 +182,9 @@ class Fusion:
         # Set by the engine while the headset is not worn (IDLE): learn the
         # gyro bias whenever it is still.
         self.learn_idle_bias = False
+        # Gyro samples at full scale since the engine started (not reset).
+        self.clipped_samples = 0
+        self._clip_burst: list[float] = []  # [first t, last t, count] of the current burst
         self._forget_idle_bias()
         self.reset()
 
@@ -162,7 +197,7 @@ class Fusion:
             self._forget_idle_bias()
         self.up: np.ndarray | None = None  # world up, in sensor coordinates
         self.bias = np.zeros(3)
-        self.bias_source = "none"  # where the calibration bias came from: "idle" or "worn"
+        self.bias_source = "none"  # where the calibration bias came from: "idle", "worn" or "vqf"
         self.calibrated = False
         self._up0: np.ndarray | None = None
         self._fwd: np.ndarray | None = None  # head forward, sensor coordinates
@@ -190,15 +225,13 @@ class Fusion:
         dt = None if self._t_gyro is None else t - self._t_gyro
         self._t_gyro = t
         self.last_gyro = w
+        self._count_clipping(t, w)
         self.stillness.add_gyro(t, w)
+        self._track_gyro(w, dt)
         if dt is None or dt > MAX_DT_S:
             return
 
         wc = w - self.bias
-        if self.up is not None:
-            # A world-fixed vector seen from the rotating head: dv/dt = -w x v.
-            self.up = _unit(self.up - np.cross(np.radians(wc), self.up) * dt)
-
         yaw_rate = -float(wc @ self.up) if self.up is not None else 0.0
         left = self._lateral()
         pitch_rate = -float(wc @ left) if left is not None else 0.0
@@ -210,14 +243,20 @@ class Fusion:
         self.pitch_rate = pitch_rate
 
         still = self.stillness.is_still()
-        if still and self.learn_idle_bias:
+        if still and self.learn_idle_bias and self._own_bias:
             self._learn_idle_bias(t, w, dt)
+            if not self.calibrated:
+                # Track "up" with it until calibration picks the bias for good.
+                idle = self.idle_bias()
+                if idle is not None:
+                    self.bias = idle
         frozen = False
         if self.calibrated and still:
             mean = self.stillness.gyro_mean()
-            if mean is not None and np.linalg.norm(mean - self.bias) < self.cfg.bias_update_max_dps:
-                k = dt / (self.cfg.bias_tau_s + dt)
-                self.bias = self.bias + k * (mean - self.bias)
+            if mean is not None and _norm(mean - self.bias) < self.cfg.bias_update_max_dps:
+                if self._own_bias:
+                    k = dt / (self.cfg.bias_tau_s + dt)
+                    self.bias = self.bias + k * (mean - self.bias)
                 frozen = self.cfg.freeze_yaw_when_still
         if not frozen:
             self.yaw_deg += yaw_rate * dt
@@ -227,10 +266,38 @@ class Fusion:
             return
         dt = None if self._t_acc is None else t - self._t_acc
         self._t_acc = t
-        norm = float(np.linalg.norm(a))
+        norm = _norm(a)
         self.stillness.add_acc(t, norm)
         if norm < 0.3:
             return  # free fall or garbage; nothing to learn about "up"
+        self._track_acc(a, norm, dt)
+
+    def _count_clipping(self, t: float, w: np.ndarray) -> None:
+        burst = self._clip_burst
+        if max(abs(x) for x in w.tolist()) >= GYRO_CLIP_DPS:
+            self.clipped_samples += 1
+            if burst:
+                burst[1], burst[2] = t, burst[2] + 1
+            else:
+                self._clip_burst = [t, t, 1]
+        elif burst and t - burst[1] > _CLIP_BURST_GAP_S:
+            log.info("gyro at full scale (245 deg/s) on %d samples over %.2f s: "
+                     "yaw may have slipped until the next shake or selection",
+                     burst[2], burst[1] - burst[0])
+            self._clip_burst = []
+
+    # --- how "up" is tracked (the part a backend replaces) -------------------
+
+    def _track_gyro(self, w: np.ndarray, dt: float | None) -> None:
+        """Every new gyro sample (raw, deg/s); dt is None or > MAX_DT_S after a gap."""
+        if dt is None or dt > MAX_DT_S or self.up is None:
+            return
+        # A world-fixed vector seen from the rotating head: dv/dt = -w x v.
+        wc = np.radians(w - self.bias)
+        self.up = _unit(self.up - _cross(wc, self.up) * dt)
+
+    def _track_acc(self, a: np.ndarray, norm: float, dt: float | None) -> None:
+        """Every new accelerometer sample (g) that is not garbage."""
         meas = a / norm
         if self.up is None:
             self.up = meas
@@ -247,9 +314,9 @@ class Fusion:
         if self.up is None:
             return None
         fwd = self._forward_axis - (self._forward_axis @ self.up) * self.up
-        if np.linalg.norm(fwd) < 0.3:
+        if _norm(fwd) < 0.3:
             return None
-        return np.cross(self.up, _unit(fwd))
+        return _cross(self.up, _unit(fwd))
 
     # --- gyro bias learned off the head ---------------------------------------
 
@@ -345,3 +412,18 @@ class Fusion:
         if self._up0 is None or self.up is None:
             return None
         return math.degrees(math.acos(max(-1.0, min(1.0, float(self._up0 @ self.up)))))
+
+
+def make_fusion(cfg: ImuConfig) -> Fusion:
+    """The orientation backend chosen by `imu.backend`."""
+    if cfg.backend == "vqf":
+        try:
+            from .fusion_vqf import VqfFusion
+        except ModuleNotFoundError as e:
+            if e.name != "vqf":
+                raise
+            raise ConfigError("imu.backend = 'vqf' needs the vqf package: pip install -e '.[vqf]'") from e
+        return VqfFusion(cfg)
+    if cfg.backend != "complementary":
+        raise ConfigError(f"unknown imu.backend {cfg.backend!r}")
+    return Fusion(cfg)

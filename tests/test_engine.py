@@ -1,4 +1,7 @@
+import importlib.util
+
 import numpy as np
+import pytest
 
 from neurocinema.config import Config
 from neurocinema.engine import State
@@ -48,6 +51,21 @@ def test_shake_resets_yaw_drift():
     assert rig.out.events("shake")
     assert rig.out.events("reset")
     assert rig.state == State.ACTIVE
+    assert abs(rig.engine.fusion.yaw_deg) < 3
+    rig.head.look(pitch=8)
+    rig.run(1.0)
+    assert rig.out.last("/target") == ("middle", "top")
+
+
+def test_a_shake_faster_than_the_gyro_range_still_resets_yaw():
+    # The gyro clips at 245 deg/s, so a vigorous shake leaves ~10 deg of yaw
+    # error behind; the reset that follows the shake erases it.
+    rig = Rig(seed=7)
+    rig.start_session()
+    rig.head.shake(rig.t, amplitude_deg=28)
+    rig.run(3.0)
+    assert rig.engine.fusion.clipped_samples > 10
+    assert rig.out.events("reset")
     assert abs(rig.engine.fusion.yaw_deg) < 3
     rig.head.look(pitch=8)
     rig.run(1.0)
@@ -225,3 +243,26 @@ def test_stand_bias_is_dropped_when_the_headset_is_unknown():
     rig.streaming = True
     rig.run(0.5)
     assert rig.engine.fusion.idle_bias() is None
+
+
+@pytest.mark.skipif(importlib.util.find_spec("vqf") is None, reason="pip install -e '.[vqf]'")
+def test_full_flow_with_the_vqf_backend():
+    cfg = Config()
+    cfg.imu.backend = "vqf"
+    rig = Rig(cfg, head=VirtualHead(seed=17, worn=False))
+    _on_the_stand_then_worn(rig)
+    assert rig.engine.fusion.bias_source == "vqf"
+    rig.head.look(yaw=-40, pitch=12)
+    rig.run(1.5)
+    assert rig.out.last("/target") == ("left", "top")
+    rig.head.nod(rig.t)
+    rig.run(1.0)
+    assert rig.out.last("/selected") == ("left", "top")
+    rig.run(2.5)
+    rig.head.look(yaw=0, pitch=0)
+    rig.run(1.5)
+    rig.engine.fusion.yaw_deg += 30
+    rig.head.shake(rig.t)
+    rig.run(3.0)
+    assert rig.out.events("reset")
+    assert abs(rig.engine.fusion.yaw_deg) < 3

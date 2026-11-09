@@ -23,6 +23,11 @@ muse = [
 dev = [
     "pytest>=8",
 ]
+# Optional orientation backend (imu.backend = "vqf"). Wheels exist for
+# macOS arm64 / CPython 3.12; elsewhere it builds C++ (Xcode command line tools).
+vqf = [
+    "vqf>=2.1",
+]
 
 [project.scripts]
 nc-engine = "neurocinema.cli:main"

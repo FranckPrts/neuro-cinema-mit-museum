@@ -30,6 +30,8 @@ def test_later_files_override(tmp_path):
     "[osc]\ndestinations = ['localhost']\n",
     "[interaction]\nmin_dwell_s = 'long'\n",
     "[gestures.nod]\nfirst_sign = 2\n",
+    "[imu]\nbackend = 'kalman'\n",
+    "[imu]\nvqf_bias_from = 'magic'\n",
 ])
 def test_bad_config_is_rejected(tmp_path, text):
     p = tmp_path / "bad.toml"

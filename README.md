@@ -151,6 +151,16 @@ the default.
   little during "keep still" doesn't spoil it. It is kept across a dropout of
   the same headset and dropped when the headset changes (`imu.idle_bias_*`).
 
+### Orientation backend (experimental)
+
+`imu.backend = "vqf"` swaps the complementary filter for
+[VQF](https://vqf.readthedocs.io), which estimates "up" and the gyro bias with
+a different method (accelerometer filtered in a near-inertial frame, Kalman
+bias estimate). Only those two estimates change: yaw, gestures, targets and
+re-centring are shared. It needs `pip install -e ".[vqf]"`. The complementary
+filter stays the default until recordings from the headset show VQF is better
+(`bench/imu/`).
+
 ## OSC reference
 
 Engine → TouchDesigner (default `127.0.0.1:7000`):
@@ -220,6 +230,7 @@ ever written to disk.
 | Path | What |
 |---|---|
 | `src/neurocinema/fusion.py` | gravity + gyro → yaw / pitch / roll, bias tracking, calibration |
+| `src/neurocinema/fusion_vqf.py` | optional VQF backend for "up" and the gyro bias (`imu.backend = "vqf"`) |
 | `src/neurocinema/gestures.py` | nod and shake detection |
 | `src/neurocinema/targets.py` | yaw/pitch → six targets, with hysteresis |
 | `src/neurocinema/engine.py` | the state machine and OSC messages |
@@ -229,6 +240,7 @@ ever written to disk.
 | `src/neurocinema/ble.py`, `headsets.py` | in-process headset link, registry, swaps, battery (`muse_direct`) |
 | `src/neurocinema/statuspage.py`, `static/status.html` | local status page for staff |
 | `src/neurocinema/sim/` | virtual head and keyboard control |
+| `bench/imu/` | IMU-only recording and replay, to compare orientation backends on real data |
 | `config/installation.toml` | every setting, documented (mirrors the code defaults) |
 
 ## Not done yet

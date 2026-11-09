@@ -7,6 +7,7 @@ rejected so a typo never silently falls back to a default.
 
 from __future__ import annotations
 
+import importlib.util
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -108,6 +109,10 @@ class StatusPageConfig:
 
 @dataclass
 class ImuConfig:
+    # Orientation backend: "complementary" (the filter below) or "vqf" (needs
+    # the optional extra: pip install -e '.[vqf]'). VQF only replaces how "up"
+    # and the gyro bias are estimated; yaw, gestures and targets are shared.
+    backend: str = "complementary"
     # Sensor axis pointing out of the forehead. Verify on the real headset.
     forward_axis: str = "x"
     invert_yaw: bool = False
@@ -136,6 +141,20 @@ class ImuConfig:
     idle_bias_tau_s: float = 10.0
     idle_bias_min_s: float = 5.0
     idle_bias_max_age_s: float = 600.0
+    # VQF only (https://vqf.readthedocs.io, VQFParams): accelerometer low-pass
+    # time constant; rest detection thresholds and minimum duration; the
+    # largest gyro bias it can represent (above it, rest is never detected).
+    vqf_tau_acc_s: float = 3.0
+    vqf_rest_th_gyr_dps: float = 4.0
+    vqf_rest_th_acc_ms2: float = 1.0
+    vqf_rest_min_s: float = 1.0
+    vqf_bias_clip_dps: float = 5.0
+    # Gyro bias with VQF: "vqf" (its own estimate, learned at rest and during
+    # motion; calibration keeps it under the idle-bias rules above and if its
+    # uncertainty is below `vqf_bias_max_sigma_dps`, otherwise starts from the
+    # worn mean) or "stillness" (the idle / calibration / still-update bias above).
+    vqf_bias_from: str = "vqf"
+    vqf_bias_max_sigma_dps: float = 0.1
 
 
 @dataclass
@@ -260,6 +279,12 @@ class Config:
             raise ConfigError("headsets.connect_attempts must be at least 1")
         if self.imu.forward_axis not in AXIS_NAMES:
             raise ConfigError(f"imu.forward_axis must be one of {AXIS_NAMES}")
+        if self.imu.backend not in ("complementary", "vqf"):
+            raise ConfigError(f"imu.backend must be 'complementary' or 'vqf', got {self.imu.backend!r}")
+        if self.imu.vqf_bias_from not in ("vqf", "stillness"):
+            raise ConfigError("imu.vqf_bias_from must be 'vqf' or 'stillness'")
+        if self.imu.backend == "vqf" and importlib.util.find_spec("vqf") is None:
+            raise ConfigError("imu.backend = 'vqf' needs the vqf package: pip install -e '.[vqf]'")
         t = self.targets
         if not t.left_yaw_deg < t.middle_yaw_deg < t.right_yaw_deg:
             raise ConfigError("targets: expected left_yaw_deg < middle_yaw_deg < right_yaw_deg")

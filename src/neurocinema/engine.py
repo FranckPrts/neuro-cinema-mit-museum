@@ -22,7 +22,7 @@ from typing import Protocol
 import numpy as np
 
 from .config import Config
-from .fusion import CalibrationError, Calibrator, Fusion
+from .fusion import CalibrationError, Calibrator, make_fusion
 from .gestures import Gesture, OscillationDetector
 from .samples import ImuSample
 from .targets import Target, TargetTracker
@@ -61,7 +61,7 @@ class Engine:
         self.cfg = cfg
         self.out = out
         self.p = cfg.osc.prefix
-        self.fusion = Fusion(cfg.imu)
+        self.fusion = make_fusion(cfg.imu)
         self.targets = TargetTracker(cfg.targets)
         self.nod = OscillationDetector("nod", cfg.gestures.nod)
         self.shake = OscillationDetector("shake", cfg.gestures.shake)
