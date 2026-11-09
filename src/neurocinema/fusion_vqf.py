@@ -23,6 +23,7 @@ getter/setter work in rad/s (its parameters are in deg/s).
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -30,6 +31,8 @@ from vqf import VQF
 
 from .config import ImuConfig
 from .fusion import MAX_DT_S, Fusion
+
+log = logging.getLogger(__name__)
 
 G = 9.80665  # m/s^2 per g
 # Muse 2 IMU rate. VQF assumes a fixed sample time; missing gyro samples are
@@ -136,10 +139,17 @@ class VqfFusion(Fusion):
 
     # --- calibration ---------------------------------------------------------------------
 
+    def stand_still_s(self) -> float:
+        return self._stand_rest_s if self._vqf_bias else super().stand_still_s()
+
     def _calibration_bias(self, worn_mean: np.ndarray) -> tuple[np.ndarray, str]:
         if not self._vqf_bias:
             return super()._calibration_bias(worn_mean)
         c = self.cfg
+        if float(np.max(np.abs(worn_mean))) > 0.9 * c.vqf_bias_clip_dps:
+            log.warning("gyro bias %s deg/s is at or above imu.vqf_bias_clip_dps (%g): VQF cannot "
+                        "follow it, so pitch will be off by a few degrees; raise vqf_bias_clip_dps",
+                        np.round(worn_mean, 1).tolist(), c.vqf_bias_clip_dps)
         b, s = self._vqf.getBiasEstimate()
         bias, sigma = np.degrees(b), math.degrees(s)
         # VQF also "rests" on a swaying head and then grows confident too

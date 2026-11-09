@@ -36,6 +36,7 @@
     text-underline-offset: 3px; }
   #hud a:hover { text-decoration-color: var(--color-paper); }
   #link.bad { color: var(--color-danger); } #link.ok { color: var(--color-success); }
+  #agree.warn { color: var(--color-warning); } #camtarget { color: #e0b25c; }
   #headset.bad { color: var(--color-danger); } #headset.warn { color: var(--color-warning); }
   /* The `------` rule from globals.css (.term-rule), between HUD sections. */
   .term-rule { height: 2px; margin: 10px 0 8px; color: var(--color-dim); opacity: 0.5;
@@ -45,6 +46,25 @@
   #log .t { color: var(--color-dim); }
   #log .err { color: var(--color-danger); }
   #help { position: absolute; bottom: 12px; left: 14px; color: var(--color-dim); font-size: 12px; }
+  #calib { position: absolute; top: 12px; right: 12px; width: 300px; padding: 12px 14px;
+    background: var(--color-surface); border-radius: 4px; }
+  #calib .row { display: flex; justify-content: space-between; gap: 8px; }
+  #calib .k { color: var(--color-dim); }
+  #calib .head { color: var(--color-dim); margin-bottom: 2px; }
+  #calib [hidden] { display: none; }
+  #calib .warn { color: var(--color-warning); } #calib .bad { color: var(--color-danger); }
+  #banner { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); max-width: min(640px, 90vw);
+    padding: 8px 12px; border-radius: 4px; background: var(--color-surface); color: var(--color-warning); }
+  #banner[hidden] { display: none; }
+  #check { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); min-width: 420px; max-width: 94vw;
+    padding: 14px 16px; border-radius: 4px; background: var(--color-surface); }
+  #check[hidden] { display: none; }
+  #check .prompt { font-size: 22px; margin-bottom: 6px; }
+  #check table { border-collapse: collapse; width: 100%; margin-top: 6px; }
+  #check td, #check th { padding: 2px 8px; text-align: right; font-weight: 400; white-space: nowrap; }
+  #check th { color: var(--color-dim); } #check td:first-child, #check th:first-child { text-align: left; }
+  #check .warn { color: var(--color-warning); } #check .bad { color: var(--color-danger); }
+  #check .k { color: var(--color-dim); }
 </style>
 <script type="importmap">
 { "imports": {
@@ -63,10 +83,44 @@
   <div class="row"><span class="k">yaw pitch roll</span><span id="pose">-</span></div>
   <div class="row"><span class="k" id="barlabel">dwell</span><span id="barval"></span></div>
   <div class="bar"><div id="bar"></div></div>
+  <div id="vs" hidden>
+    <div class="term-rule"></div>
+    <div class="row"><span class="k">camera target</span><span id="camtarget">-</span></div>
+    <div class="row"><span class="k">agree</span><span id="agree">-</span></div>
+    <div class="row"><span class="k">disagreements</span><span id="disagree">0</span></div>
+  </div>
   <div class="term-rule"></div>
   <div id="log"></div>
 </div>
-<div id="help">drag to orbit · scroll to zoom · v: visitor's view · [ ]: gaze cone size</div>
+<div id="help">drag to orbit · scroll to zoom · v: visitor's view · b: view follows imu / camera · r: room check · [ ]: gaze cone size · white = imu, gold = camera</div>
+<div id="banner" hidden></div>
+<div id="check" hidden>
+  <div class="prompt" id="check-prompt"></div>
+  <div class="k" id="check-sub"></div>
+  <table id="check-table"></table>
+  <div class="k" style="margin-top:8px">r: start again · Esc: close · c: copy as CSV</div>
+</div>
+<div id="calib">
+  <div class="head">calibration</div>
+  <div class="row"><span class="k">room</span><span id="c-room">from this viewer's config</span></div>
+  <div id="c-imu" hidden>
+    <div class="term-rule"></div>
+    <div class="head">imu</div>
+    <div class="row"><span class="k">backend</span><span id="c-backend">-</span></div>
+    <div class="row"><span class="k">gyro bias</span><span id="c-bias">-</span></div>
+    <div class="row"><span class="k">calibrated</span><span id="c-since">-</span></div>
+    <div class="row"><span class="k">yaw corrected since</span><span id="c-corr">-</span></div>
+    <div class="row"><span class="k">gyro at full scale</span><span id="c-clip">-</span></div>
+  </div>
+  <div id="c-cam" hidden>
+    <div class="term-rule"></div>
+    <div class="head">camera</div>
+    <div class="row"><span class="k">position (m)</span><span id="c-cpos">-</span></div>
+    <div class="row"><span class="k">bearing / tilt</span><span id="c-cdir">-</span></div>
+    <div class="row"><span class="k">eye height</span><span id="c-ceye">-</span></div>
+    <div class="row"><span class="k">divider / arm pitch</span><span id="c-csplit">-</span></div>
+  </div>
+</div>
 <script type="module">
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -217,6 +271,16 @@ for (const [col, [y0, y1]] of Object.entries(colRange)) {
   }
 }
 
+// The camera's target: a gold overlay on the same regions (a whole column
+// when the camera has no rows, e.g. in head mode).
+const camRegions = {};
+for (const [key, mesh] of Object.entries(regions)) {
+  const m = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({ color: 0xe0b25c, transparent: true,
+    opacity: 0, side: THREE.DoubleSide, depthWrite: false, wireframe: true }));
+  scene.add(m);
+  camRegions[key] = m;
+}
+
 // Boundary rays on the floor: solid at each boundary, faint at the hysteresis edges.
 function floorRay(yaw, color, opacity) {
   const r = wallRange(yaw), h = dir(yaw);
@@ -269,13 +333,65 @@ scene.add(gaze);
 const hit = new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 8), new THREE.MeshBasicMaterial({ color: PAL.paper }));
 scene.add(hit);
 
+// Calibration gaze: where yaw 0 / pitch 0 point (the middle of the middle
+// screen at eye height, where the visitor looks while calibrating). Dashed.
+{
+  const d = dir(0, 0), len = exitDistance(VISITOR, d);
+  const g = new THREE.BufferGeometry().setFromPoints([VISITOR.clone(), VISITOR.clone().addScaledVector(d, len)]);
+  const line = new THREE.Line(g, new THREE.LineDashedMaterial({ color: PAL.dim, dashSize: 0.12, gapSize: 0.08 }));
+  line.computeLineDistances();
+  scene.add(line);
+  const mark = new THREE.Mesh(new THREE.RingGeometry(0.07, 0.09, 32), new THREE.MeshBasicMaterial({ color: PAL.dim, side: THREE.DoubleSide }));
+  mark.position.copy(VISITOR).addScaledVector(d, len * 0.995);
+  scene.add(mark);
+}
+
+// The camera (camera bench), from /nc/cam/calib: a cone at its position,
+// opening toward its aim point. Room frame: origin on the floor under the
+// visitor's eyes, x right, y up, z behind the visitor.
+const CAM_COLOR = 0xe0b25c;
+const camGroup = new THREE.Group();
+camGroup.visible = false;
+scene.add(camGroup);
+{
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.4, 4, 1, true),
+    new THREE.MeshBasicMaterial({ color: CAM_COLOR, wireframe: true }));
+  cone.rotation.x = Math.PI / 2;   // apex at the camera, opening along -z (its view direction)
+  cone.position.z = -0.2;
+  camGroup.add(cone);
+  camGroup.add(new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 0.07), new THREE.MeshBasicMaterial({ color: CAM_COLOR })));
+}
+const camAimLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+  new THREE.LineDashedMaterial({ color: CAM_COLOR, dashSize: 0.08, gapSize: 0.06 }));
+camAimLine.visible = false;
+scene.add(camAimLine);
+const roomPoint = (x, y, z) => new THREE.Vector3(VISITOR.x + x, y, VISITOR.z + z);
+
+// The camera's gaze (/nc/cam/pose), next to the IMU's white one.
+const camGaze = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), VISITOR, 1, CAM_COLOR, 0.18, 0.08);
+camGaze.visible = false;
+scene.add(camGaze);
+const camHit = new THREE.Mesh(new THREE.SphereGeometry(0.05, 16, 8), new THREE.MeshBasicMaterial({ color: CAM_COLOR }));
+camHit.visible = false;
+scene.add(camHit);
+
 // Gaze cone projected onto the screens (see gaze_projection.js). Room-frame
 // origin = floor point under the visitor's eyes.
 const projection = new GazeProjection(scene, conf.room, new THREE.Vector3(VISITOR.x, 0, VISITOR.z), params);
 
 // --- live state -----------------------------------------------------------
 const S = { yaw: 0, pitch: 0, roll: 0, state: "-", target: null, dwell: 0, calibration: 0,
-  lastBeat: 0, lastMsg: 0, selected: null, selectedAt: -1e9, flashAt: -1e9, lastHeadset: -1e9 };
+  lastBeat: 0, lastMsg: 0, selected: null, selectedAt: -1e9, flashAt: -1e9, lastHeadset: -1e9, lastPose: -1e9 };
+// The camera bench (/nc/cam/*), and how often it agrees with the IMU.
+const C = { yaw: 0, pitch: 0, target: null, dwell: 0, state: "-", lastPose: -1e9, lastMsg: -1e9,
+  selected: null, selectedAt: -1e9 };
+const V = { both: 0, agree: 0, diffSince: null, counted: false, count: 0, last: performance.now() };
+let viewFollows = "imu";
+addEventListener("keydown", (e) => {
+  if (e.key !== "b" || e.repeat) return;
+  viewFollows = viewFollows === "imu" ? "camera" : "imu";
+  logLine(`visitor's view follows the ${viewFollows}`);
+});
 const $ = (id) => document.getElementById(id);
 
 function logLine(text, cls = "") {
@@ -290,7 +406,15 @@ function logLine(text, cls = "") {
 function onMessage(a, v) {
   S.lastMsg = performance.now();
   switch (a) {
-    case "pose": [S.yaw, S.pitch, S.roll] = v.map(Number); break;
+    case "pose": [S.yaw, S.pitch, S.roll] = v.map(Number); S.lastPose = performance.now(); break;
+    case "cam/pose": [C.yaw, C.pitch] = v.map(Number); C.lastPose = C.lastMsg = performance.now(); break;
+    case "cam/target":
+      C.target = v[0] === "none" ? null : (v[1] === "none" ? v[0] : `${v[0]}/${v[1]}`);
+      C.lastMsg = performance.now(); break;
+    case "cam/dwell": C.dwell = Number(v[0]); break;
+    case "cam/state": C.state = v[0]; C.lastMsg = performance.now(); break;
+    case "cam/selected": C.selected = v[1] === "none" ? v[0] : `${v[0]}/${v[1]}`; C.selectedAt = performance.now(); break;
+    case "cam/event": logLine(`camera ${v.join(" ")}`); break;
     case "dwell": S.dwell = Number(v[0]); break;
     case "calibration": S.calibration = Number(v[0]); break;
     case "heartbeat": S.lastBeat = performance.now(); break;
@@ -309,6 +433,9 @@ function onMessage(a, v) {
       if (["confirm", "recenter", "calibrated", "reset"].includes(v[0])) S.flashAt = performance.now();
       if (v[0] === "selected") { S.selected = `${v[1]}/${v[2]}`; S.selectedAt = performance.now(); }
       break;
+    case "calib/imu": onCalibImu(v); break;
+    case "calib/room": onCalibRoom(v); break;
+    case "cam/calib": onCamCalib(v.map(Number)); break;
     case "status/error":
       if (v[0] !== "ok") logLine(`ERROR ${v.join(" ")}`, "err"); break;
     case "headset": {
@@ -324,6 +451,142 @@ function onMessage(a, v) {
     }
   }
 }
+
+// --- calibration (engine /calib/*, camera /cam/calib) ---------------------
+const banner = { room: "", cam: "" };
+function showBanner() {
+  const text = [banner.room, banner.cam].filter(Boolean).join(" · ");
+  $("banner").textContent = text; $("banner").hidden = !text;
+}
+function setText(id, text, cls = "") { $(id).textContent = text; $(id).className = cls; }
+
+function onCalibImu([backend, source, bias, since, corrected, clipped]) {
+  $("c-imu").hidden = false;
+  setText("c-backend", backend);
+  setText("c-bias", source === "none" ? "none yet" : `${Number(bias).toFixed(2)} °/s from ${source}`,
+    source === "worn" ? "warn" : "");  // worn = it did not rest on the stand long enough
+  since = Number(since);
+  setText("c-since", since < 0 ? "not yet" : since < 120 ? `${Math.round(since)} s ago` : `${(since / 60).toFixed(0)} min ago`);
+  corrected = Number(corrected);
+  setText("c-corr", since < 0 ? "-" : `${corrected.toFixed(1)}°`, corrected > 30 ? "bad" : corrected > 12 ? "warn" : "");
+  clipped = Number(clipped);
+  setText("c-clip", since < 0 ? "-" : `${clipped} samples`, clipped > 0 ? "warn" : "");
+}
+
+function onCalibRoom(v) {
+  const [fromRoom, hash] = [Number(v[0]), v[1]];
+  const engine = v.slice(2).map(Number);  // left, middle, right, then the four bounds
+  const mine = [cfg.left_yaw_deg, cfg.middle_yaw_deg, cfg.right_yaw_deg, ...conf.bounds];
+  const same = engine.length === mine.length && engine.every((x, i) => Math.abs(x - mine[i]) < 0.1);
+  setText("c-room", fromRoom ? `room file ${hash ? hash.slice(0, 6) : "?"}` : "[targets] yaws (from_room = false)",
+    same ? "" : "bad");
+  banner.room = same ? "" : "The engine's screens differ from this viewer's (another config or room file?): "
+    + `engine centres ${engine.slice(0, 3).map((x) => x.toFixed(1)).join(" / ")}°`;
+  showBanner();
+}
+
+function onCamCalib([x, y, z, ax, ay, az, bearing, tilt, eye, split, pitchOffset]) {
+  $("c-cam").hidden = false;
+  const pos = roomPoint(x, y, z), aim = roomPoint(ax, ay, az);
+  camGroup.position.copy(pos);
+  camGroup.lookAt(aim);       // turns the group's +z toward the aim point...
+  camGroup.rotateY(Math.PI);  // ...so flip it: the cone opens along -z
+  camGroup.visible = true;
+  camAimLine.geometry.setFromPoints([pos, aim]);
+  camAimLine.computeLineDistances();
+  camAimLine.visible = true;
+  setText("c-cpos", `${x.toFixed(2)} ${y.toFixed(2)} ${z.toFixed(2)}`);
+  setText("c-cdir", `${bearing >= 0 ? "+" : ""}${bearing.toFixed(1)}° / ${tilt.toFixed(1)}°`);
+  const eyeOff = Math.abs(eye - EYE) > 0.01;
+  setText("c-ceye", `${eye.toFixed(2)} m`, eyeOff ? "bad" : "");
+  setText("c-csplit", `${(split * 100).toFixed(0)} % / ${pitchOffset >= 0 ? "+" : ""}${pitchOffset.toFixed(1)}°`);
+  banner.cam = eyeOff ? `Camera bench eye height ${eye.toFixed(2)} m, viewer room ${EYE.toFixed(2)} m: different room files?` : "";
+  showBanner();
+}
+
+// --- room check -------------------------------------------------------------
+// The visitor looks at the centre of each screen half in turn (spoken and shown
+// here); each backend's yaw and pitch, averaged over the hold, are compared
+// with the true direction from the room geometry. Ends on middle top again,
+// to show drift over the check.
+const CHECK_ORDER = ["middle/top", "middle/bottom", "left/top", "left/bottom", "right/top", "right/bottom", "middle/top"];
+const MOVE_S = 2.0, HOLD_S = 2.5;
+const SCREEN_INSET = conf.room.screens.inset_m;
+function trueDirection(key) {
+  const [col, row] = key.split("/");
+  const yaw = centres[col];
+  const dist = wallRange(yaw);
+  const h0 = SCREEN_INSET, h1 = CEILING - SCREEN_INSET;   // screen bottom and top
+  const mid = (h0 + h1) / 2;
+  const height = row === "top" ? (mid + h1) / 2 : (h0 + mid) / 2;  // centre of that half
+  return { yaw, pitch: Math.atan2(height - EYE, dist) / D2R };
+}
+const RC = { active: false, i: 0, phaseStart: 0, samples: null, results: [] };
+function say(text) {
+  try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text)); } catch (e) { /* no voice */ }
+}
+function startCheck() {
+  Object.assign(RC, { active: true, i: 0, phaseStart: performance.now(), samples: { imu: [], cam: [] }, results: [] });
+  $("check").hidden = false;
+  say(`Room check. Look at the centre of ${CHECK_ORDER[0].replace("/", " ")}.`);
+  renderCheck();
+}
+const mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+function stepCheck(now, imuLive, camLive) {
+  if (!RC.active) return;
+  const key = CHECK_ORDER[RC.i];
+  const t = (now - RC.phaseStart) / 1000;
+  if (t >= MOVE_S) {
+    if (imuLive) RC.samples.imu.push([S.yaw, S.pitch]);
+    if (camLive) RC.samples.cam.push([C.yaw, C.pitch]);
+  }
+  $("check-sub").textContent = t < MOVE_S ? "turn to it…" : `hold still… ${Math.max(0, MOVE_S + HOLD_S - t).toFixed(1)} s`;
+  if (t < MOVE_S + HOLD_S) return;
+  const truth = trueDirection(key), r = { key, truth };
+  for (const b of ["imu", "cam"]) {
+    const xs = RC.samples[b];
+    r[b] = xs.length ? { yaw: mean(xs.map((x) => x[0])) - truth.yaw, pitch: mean(xs.map((x) => x[1])) - truth.pitch } : null;
+  }
+  RC.results.push(r);
+  RC.i += 1; RC.phaseStart = now; RC.samples = { imu: [], cam: [] };
+  if (RC.i >= CHECK_ORDER.length) { RC.active = false; say("Room check done."); logLine("room check done"); }
+  else say(CHECK_ORDER[RC.i].replace("/", " ") + (RC.i === CHECK_ORDER.length - 1 ? ", again" : ""));
+  renderCheck();
+}
+const fmt = (e) => e == null ? "-" : `${e >= 0 ? "+" : ""}${e.toFixed(1)}`;
+const errClass = (e) => e == null ? "" : Math.abs(e) > 15 ? "bad" : Math.abs(e) > 6 ? "warn" : "";
+function renderCheck() {
+  $("check-prompt").textContent = RC.active ? `look at: ${CHECK_ORDER[RC.i].replace("/", " ")} (${RC.i + 1}/${CHECK_ORDER.length})`
+    : "room check (error, degrees; + = right / up)";
+  if (!RC.active) $("check-sub").textContent = "";
+  const rows = ["<tr><th>screen</th><th>true yaw / pitch</th><th>imu yaw</th><th>imu pitch</th><th>cam yaw</th><th>cam pitch</th></tr>"];
+  for (const r of RC.results) {
+    const c = (e) => `<td class="${errClass(e)}">${fmt(e)}</td>`;
+    rows.push(`<tr><td>${r.key}</td><td>${r.truth.yaw.toFixed(1)} / ${r.truth.pitch.toFixed(1)}</td>`
+      + c(r.imu?.yaw) + c(r.imu?.pitch) + c(r.cam?.yaw) + c(r.cam?.pitch) + "</tr>");
+  }
+  if (!RC.active && RC.results.length) {
+    const med = (b, k) => { const xs = RC.results.map((r) => r[b]?.[k]).filter((x) => x != null).map(Math.abs).sort((a, b) => a - b);
+      return xs.length ? xs[Math.floor(xs.length / 2)] : null; };
+    const c = (e) => `<td class="${errClass(e)}">${e == null ? "-" : e.toFixed(1)}</td>`;
+    rows.push(`<tr><th>median |error|</th><td></td>${c(med("imu", "yaw"))}${c(med("imu", "pitch"))}${c(med("cam", "yaw"))}${c(med("cam", "pitch"))}</tr>`);
+  }
+  $("check-table").innerHTML = rows.join("");
+}
+function checkCsv() {
+  const lines = ["screen,true_yaw,true_pitch,imu_yaw_err,imu_pitch_err,cam_yaw_err,cam_pitch_err"];
+  for (const r of RC.results) lines.push([r.key, r.truth.yaw.toFixed(2), r.truth.pitch.toFixed(2),
+    r.imu?.yaw?.toFixed(2) ?? "", r.imu?.pitch?.toFixed(2) ?? "", r.cam?.yaw?.toFixed(2) ?? "", r.cam?.pitch?.toFixed(2) ?? ""].join(","));
+  return lines.join("\n");
+}
+addEventListener("keydown", (e) => {
+  if (e.repeat) return;
+  if (e.key === "r") startCheck();
+  else if (e.key === "Escape") { RC.active = false; $("check").hidden = true; speechSynthesis.cancel(); }
+  else if (e.key === "c" && !$("check").hidden && RC.results.length) {
+    navigator.clipboard?.writeText(checkCsv()).then(() => logLine("room check copied as CSV"));
+  }
+});
 
 function connect() {
   const es = new EventSource("/events");
@@ -365,6 +628,49 @@ function frame() {
   const flash = Math.max(0, 1 - (now - S.flashAt) / 600);
   band.material.emissive.setRGB(flash * 0.93, flash * 0.9, flash * 0.85);
 
+  // Camera: gaze, target overlay, agreement with the IMU.
+  const camLive = now - C.lastPose < 1000;
+  const camOn = now - C.lastMsg < 3000;
+  if (camLive) {
+    const cd = dir(C.yaw, C.pitch), cl = exitDistance(VISITOR, cd);
+    camGaze.setDirection(cd);
+    camGaze.setLength(cl, Math.min(0.25, cl * 0.1), 0.08);
+    camHit.position.copy(VISITOR).addScaledVector(cd, cl);
+  }
+  camGaze.visible = camHit.visible = camLive && !(firstPerson && viewFollows === "camera");
+  const camSinceSel = (now - C.selectedAt) / 1000;
+  for (const [key, m] of Object.entries(camRegions)) {
+    const on = C.target && (key === C.target || key.split("/")[0] === C.target);
+    const sel = C.selected && (key === C.selected || key.split("/")[0] === C.selected) && camSinceSel < 2;
+    m.material.opacity = camOn && (on || sel) ? (sel ? 0.9 : 0.35 + 0.5 * C.dwell) : 0;
+  }
+  const dt = (now - V.last) / 1000; V.last = now;
+  const imuLive = now - S.lastPose < 1000;
+  $("vs").hidden = !camOn;
+  $("camtarget").textContent = C.target ?? "none";
+  if (imuLive && camLive) {
+    V.both += dt;
+    // Compare columns when the camera has no rows.
+    const imuT = S.target && C.target && !C.target.includes("/") ? S.target.split("/")[0] : S.target;
+    if (imuT === C.target) { V.agree += dt; V.diffSince = null; V.counted = false; }
+    else {
+      if (V.diffSince === null) V.diffSince = now;
+      if (!V.counted && now - V.diffSince > 500) {
+        V.counted = true; V.count += 1;
+        logLine(`imu ${S.target ?? "none"} / camera ${C.target ?? "none"}`, "err");
+      }
+    }
+    const differing = V.diffSince !== null && now - V.diffSince > 500;
+    $("agree").textContent = `${Math.round(100 * V.agree / Math.max(V.both, 1e-9))} %`
+      + (differing ? ` · now differ ${((now - V.diffSince) / 1000).toFixed(1)} s` : " of the time");
+    $("agree").className = differing ? "warn" : "";
+  } else if (camOn) {
+    $("agree").textContent = imuLive ? "camera not tracking" : "imu not tracking";
+    $("agree").className = "";
+  }
+  $("disagree").textContent = String(V.count);
+  stepCheck(now, imuLive, camLive);
+
   // HUD
   $("pose").textContent = `${S.yaw.toFixed(1)} / ${S.pitch.toFixed(1)} / ${S.roll.toFixed(1)}`;
   const calibrating = S.state === "calibrating";
@@ -381,8 +687,10 @@ function frame() {
   $("headsetrow").hidden = now - S.lastHeadset > 3000;
 
   if (firstPerson) {
-    camera.position.copy(VISITOR).addScaledVector(d, 0.12);
-    camera.lookAt(hit.position);
+    const useCam = viewFollows === "camera" && camLive;
+    const fd = useCam ? dir(C.yaw, C.pitch) : d;
+    camera.position.copy(VISITOR).addScaledVector(fd, 0.12);
+    camera.lookAt(useCam ? camHit.position : hit.position);
   } else {
     controls.update();
   }

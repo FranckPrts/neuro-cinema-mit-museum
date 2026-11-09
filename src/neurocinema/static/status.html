@@ -50,6 +50,15 @@
   .small { color: var(--quiet); font-size: 14px; }
   code { font-size: 13px; }
   #conn { display: none; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .estate { font-size: 22px; font-weight: 700; }
+  .bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 10px 0 4px; display: none; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 12px 0 14px; font-size: 15px; }
+  dl.facts dt { color: var(--quiet); }
+  dl.facts dd { margin: 0; }
+  .warn-text { color: var(--warn); }
+  .ok-text { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -57,15 +66,35 @@
   <div id="banner" class="banner"><h1 id="headline">Loading…</h1><p id="detail"></p></div>
   <p id="conn" class="small">Cannot reach the engine. Is the computer on and nc-engine running?</p>
 
+  <h2>Engine</h2>
+  <div class="card">
+    <div class="estate"><span id="e-state">…</span> <span id="e-since" class="small"></span></div>
+    <div id="e-bar" class="bar"><div></div></div>
+    <p id="e-detail" class="small"></p>
+    <dl id="e-facts" class="facts"></dl>
+    <div class="row">
+      <button id="calibrate" class="primary">Calibrate now</button>
+      <button id="putdown">Headset is on its stand</button>
+      <button id="recentre">Re-centre</button>
+    </div>
+    <p class="small"><b>Calibrate now:</b> the visitor wears the headset, looks at the centre of the middle
+      screen and keeps still for 2 s; that gaze becomes straight ahead and level.
+      <b>Headset is on its stand:</b> when the engine has not noticed by itself; it then learns the gyro bias
+      while the headset rests (leave it still at least 5 s, better 10).
+      <b>Re-centre:</b> the visitor faces the middle screen; resets the left/right drift, like a head shake.</p>
+  </div>
+
+  <section id="hs-section">
   <h2>Headsets</h2>
   <div id="headsets" class="grid"></div>
   <p class="small">To swap: wait until nobody wears the headset, switch the old one off and put it on the charger,
     switch a charged one on, tap its letter here (check the # matches the number printed on the headset), then pick it up.</p>
+  </section>
 
   <h2>Tools</h2>
   <div class="row">
-    <button id="reconnect">Reconnect</button>
-    <button id="release">Stop using headset</button>
+    <button id="reconnect" class="hs-only">Reconnect</button>
+    <button id="release" class="hs-only">Stop using headset</button>
     <button id="sound">Turn on alert sound</button>
   </div>
   <div id="unknown"></div>
@@ -95,6 +124,9 @@ async function post(path, body) {
   refresh();
 }
 $("reconnect").onclick = () => post("/api/reconnect");
+$("calibrate").onclick = () => post("/api/engine/recalibrate");
+$("putdown").onclick = () => post("/api/engine/idle");
+$("recentre").onclick = () => post("/api/engine/reset");
 $("release").onclick = () => {
   if (confirm("Stop using the current headset?")) post("/api/release");
 };
@@ -110,7 +142,83 @@ function hwCode(name) {
   return name.replace(/^Muse-?/i, "");
 }
 
+const STATE = {
+  disconnected: "No data from the headset",
+  idle: "Headset off (on its stand)",
+  calibrating: "Calibrating",
+  active: "Tracking",
+  selected: "Tracking (just selected)",
+  resetting: "Re-centring after a shake",
+};
+const BIAS_FROM = {
+  idle: "learned on the stand", worn: "measured on the head (2 s)", vqf: "VQF, learned on the stand", none: "none yet",
+};
+const TRACKING = ["active", "selected", "resetting"];
+let managed = true;
+
+function fact(dl, name, value, cls) {
+  const dt = document.createElement("dt"), dd = document.createElement("dd");
+  dt.textContent = name; dd.textContent = value;
+  if (cls) dd.className = cls;
+  dl.append(dt, dd);
+}
+
+function renderEngine(e) {
+  const tracking = TRACKING.includes(e.state);
+  $("e-state").textContent = STATE[e.state] || e.state;
+  $("e-since").textContent = `for ${ago(Math.round(e.state_s)).replace(" ago", "")}`;
+  const bar = $("e-bar");
+  bar.style.display = e.calibration_progress === null ? "none" : "block";
+  bar.firstElementChild.style.width = `${Math.round(100 * (e.calibration_progress || 0))}%`;
+  $("e-detail").textContent = {
+    disconnected: "Switch the headset on, or check it is in range.",
+    idle: "Picking the headset up starts calibration.",
+    calibrating: "The visitor looks at the centre of the middle screen and keeps still.",
+  }[e.state] || "";
+
+  const dl = $("e-facts");
+  dl.replaceChildren();
+  if (e.calibrated) {
+    const near = e.bias_limit_dps !== null && e.bias_dps.some((b) => Math.abs(b) > 0.9 * e.bias_limit_dps);
+    fact(dl, "Calibrated", `${ago(e.calibrated_s_ago)}, gyro bias ${BIAS_FROM[e.bias_source] || e.bias_source}`);
+    fact(dl, "Gyro bias", `${e.bias_dps.join(", ")} °/s` +
+         (near ? ` — near the VQF limit (${e.bias_limit_dps} °/s): raise imu.vqf_bias_clip_dps` : ""),
+         near ? "warn-text" : "");
+  } else {
+    fact(dl, "Calibrated", "not yet");
+  }
+  const enough = e.stand_still_s >= e.stand_needed_s;
+  fact(dl, "On the stand", e.stand_still_s > 0
+    ? `still for ${Math.round(e.stand_still_s)} s` + (enough ? " — gyro bias ready" : ` (needs ${e.stand_needed_s} s)`)
+    : "no gyro bias learned yet", enough ? "ok-text" : "");
+  if (tracking) {
+    fact(dl, "Head", `yaw ${e.yaw_deg}°, pitch ${e.pitch_deg}°`);
+    const motion = e.motion_dps === null ? "–" : `${e.motion_dps} °/s`;
+    fact(dl, "Put-down check",
+         `motion ${motion} (put down if below ${e.put_down_motion_dps} °/s for ${e.put_down_after_s} s` +
+         (e.dead_still_s !== null ? `: ${Math.round(e.dead_still_s)} s so far` : "") +
+         `); tilt ${e.tilt_deg ?? "–"}° (put down above ${e.put_down_tilt_deg}°)`);
+  } else if (e.motion_dps !== null) {
+    fact(dl, "Motion", `${e.motion_dps} °/s`);
+  }
+
+  $("calibrate").disabled = !e.connected;
+  $("putdown").disabled = !e.connected || e.state === "idle";
+  $("recentre").disabled = !tracking;
+
+  if (!managed) {
+    const cls = { disconnected: "offline", calibrating: "action" }[e.state] || "ok";
+    $("banner").className = "banner " + cls;
+    $("headline").textContent = STATE[e.state] || e.state;
+    $("detail").textContent = $("e-detail").textContent;
+  }
+}
+
 function render(s) {
+  managed = s.managed !== false;
+  $("hs-section").style.display = managed ? "" : "none";
+  for (const b of document.querySelectorAll(".hs-only")) b.style.display = managed ? "" : "none";
+  if (!managed) return;
   const busy = s.phase === "connecting" || s.phase === "confirming";
   $("banner").className = "banner " + (busy && s.alert !== "offline" ? "action" : s.alert);
   $("headline").textContent = busy ? s.message : s.headline;
@@ -163,8 +271,13 @@ function render(s) {
 
 async function refresh() {
   try {
-    const r = await fetch("/api/status", { cache: "no-store" });
-    render(await r.json());
+    const [hs, eng] = await Promise.all([fetch("/api/status", { cache: "no-store" }),
+                                         fetch("/api/engine", { cache: "no-store" })]);
+    render(await hs.json());
+    if (eng.ok) {
+      const e = await eng.json();
+      if (e.state) renderEngine(e);
+    }
     $("conn").style.display = "none";
   } catch (e) {
     $("conn").style.display = "block";

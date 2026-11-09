@@ -73,6 +73,26 @@ destinations = ["127.0.0.1:7000", "127.0.0.1:7002"]
 
 and run `nc-monitor --port 7002`.
 
+## Everything together: engine, camera, viewer
+
+One OSC port can be received by one program, but any number can send to it.
+So the engine and the camera bench both send to the viewer:
+
+```bash
+nc-engine                                                  # IMU -> /nc/... on 7000
+python bench/camera/camera_bench.py --osc 127.0.0.1:7000   # camera -> /nc/cam/... on 7000
+python viewer/nc_viewer.py                                 # receives both, http://127.0.0.1:8080
+```
+
+To keep TouchDesigner (or `nc-monitor`) on 7000, send the engine to a second
+port too (`[osc] destinations = ["127.0.0.1:7000", "127.0.0.1:7003"]`), send
+the camera to 7003, and run `python viewer/nc_viewer.py --osc-port 7003`.
+
+In the viewer: white = IMU, gold = camera; the calibration card (top right)
+shows what each one was set up with; `r` runs the room check (each backend's
+error at each screen). Everything reads `config/room.toml`, so measure the
+room there first. See `viewer/README.md`.
+
 ## First session with the real headset
 
 1. `muselsl list` and put the headset's address in `config/local.toml`
@@ -92,11 +112,35 @@ and run `nc-monitor --port 7002`.
 5. Tune gestures with real visitors (see the checklist below). The
    `nod_ignored` events and the `motion` value in `nc-monitor` help.
 
-## Headset manager and status page (proof of concept)
+## Status page: calibrate, put down, re-centre
+
+`nc-engine` serves a local page for staff at http://127.0.0.1:8081, whatever
+the source (`[status_page]`; `host = "0.0.0.0"` to open it from a tablet). Its
+Engine card shows what the engine is doing, when it last calibrated and where
+the gyro bias came from, and three buttons:
+
+- **Calibrate now**: the visitor wears the headset, looks at the centre of the
+  middle screen and keeps still for 2 s; that gaze becomes straight ahead and
+  level. Calibration also starts by itself when the headset is picked up, at
+  the first 2 s of stillness, wherever the visitor is looking then. Press it
+  when the height looks off.
+- **Headset is on its stand**: the engine goes idle. It notices by itself when
+  the headset is tilted more than 70° from how it was worn for 3 s, or
+  completely still (motion below 0.6 °/s) for 20 s; the card shows both
+  numbers live. While idle and still it learns the gyro bias ("On the stand":
+  5 s minimum, 10 s better), and the next calibration starts from it.
+- **Re-centre**: the visitor faces the middle screen; this resets the
+  left/right drift, like a head shake.
+
+The same actions are OSC commands: `/nc/cmd/recalibrate`, `/nc/cmd/idle`,
+`/nc/cmd/reset`.
+
+## Headset manager (proof of concept)
 
 `source.kind = "muse_direct"` connects to the headset inside the engine
 (muselsl's `Muse` class, no `muselsl stream`, no LSL), so the engine can read
-the battery and switch headsets without a restart. Staff use a local web page.
+the battery and switch headsets without a restart. The status page then also
+shows the headsets, their battery and the swap buttons.
 
 **Try it without hardware** (four simulated headsets, A starts at 22 %):
 
@@ -161,7 +205,9 @@ a different method (accelerometer filtered in a near-inertial frame, Kalman
 bias estimate). Only those two estimates change: yaw, gestures, targets and
 re-centring are shared. It needs `pip install -e ".[vqf]"`. The complementary
 filter stays the default until recordings from the headset show VQF is better
-(`bench/imu/`).
+(`bench/imu/`). VQF can only follow a gyro bias up to `imu.vqf_bias_clip_dps`
+per axis (10 °/s; headset C has about 6 °/s on one axis). Above it pitch is
+off by a few degrees, and the engine logs a warning at calibration.
 
 ## OSC reference
 
@@ -226,7 +272,10 @@ ever written to disk.
 - [ ] Time from putting the headset on to first selection
 - [ ] Tall and short visitors, glasses, long hair, loose fit
 - [ ] `idle` triggers when the headset is put down, and not while a visitor
-      watches still (tune `idle_gyro_range_dps` using `motion` in nc-monitor)
+      watches still (tune `idle_gyro_range_dps` using `motion` in nc-monitor
+      or the status page's put-down check)
+- [ ] Calibrations log `from idle`: the headset rests on its stand, switched
+      on, at least 10 s before the next visitor
 - [ ] Recovery: headset switched off and on, out of range and back, muselsl killed, engine killed
 
 ## Code map

@@ -368,6 +368,40 @@ class Engine:
                       *(round(v, 2) for v in (t.left_yaw_deg, t.middle_yaw_deg, t.right_yaw_deg)),
                       *(round(v, 2) for v in t.bounds()))
 
+    def status(self, now: float) -> dict:
+        """What the status page shows: state, calibration, and the numbers the
+        "headset put down" rules look at (`App` copies it for the page's thread)."""
+        f, ic = self.fusion, self.cfg.interaction
+        motion = f.stillness.gyro_range()
+        tilt = f.tilt_from_calibration_deg() if f.calibrated else None
+        tracking = self.state in _TRACKING
+        return {
+            "state": self.state.value,
+            "state_s": round(now - self.state_since, 1),
+            "connected": self.connected,
+            "phase": self.phase.value,
+            "backend": self.cfg.imu.backend,
+            "calibrated": f.calibrated,
+            "calibrated_s_ago": (round(now - self._calib_t) if f.calibrated and self._calib_t is not None
+                                 else None),
+            "calibration_progress": (round(self.calibrator.progress(now), 2)
+                                     if self.state == State.CALIBRATING else None),
+            "bias_source": f.bias_source,
+            "bias_dps": [round(float(v), 2) for v in f.bias],
+            "bias_limit_dps": self.cfg.imu.vqf_bias_clip_dps if self.cfg.imu.backend == "vqf" else None,
+            "stand_still_s": round(f.stand_still_s(), 1),
+            "stand_needed_s": self.cfg.imu.idle_bias_min_s,
+            "motion_dps": None if motion is None else round(motion, 2),
+            "put_down_motion_dps": ic.idle_gyro_range_dps,
+            "dead_still_s": (round(now - self._idle_still_since, 1)
+                             if tracking and self._idle_still_since is not None else None),
+            "put_down_after_s": ic.idle_still_s,
+            "tilt_deg": None if tilt is None else round(tilt),
+            "put_down_tilt_deg": ic.idle_tilt_deg,
+            "yaw_deg": round(f.yaw_deg, 1) if tracking else None,
+            "pitch_deg": round(f.pitch_deg, 1) if tracking else None,
+        }
+
     def emit_snapshot(self) -> None:
         """Re-send the latest discrete values, so a late-starting TD catches up."""
         self.out.send(f"{self.p}/state", self.state.value)

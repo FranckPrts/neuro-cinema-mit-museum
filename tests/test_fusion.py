@@ -338,3 +338,24 @@ def test_gyro_clips_at_full_scale_and_bursts_are_logged_once(caplog):
     assert max(peak) == pytest.approx(245.0)
     assert rig.f.clipped_samples > 10
     assert len([r for r in caplog.records if "full scale" in r.message]) == 1
+
+
+def test_a_large_gyro_bias_does_not_tilt_the_pitch(variant):
+    """Headset C has ~6 deg/s of bias on the pitch axis (more than VQF's old
+    5 deg/s limit, which left pitch ~3 deg off while looking level)."""
+    head = VirtualHead(seed=40, gyro_bias_dps=(-1.7, 6.0, 0.45))
+    rig = FusionRig(head, make_cfg(variant))
+    rig.calibrate()
+    errors: list[float] = []
+    rig.run(20, each=lambda: errors.append(abs(rig.f.pitch_deg - head.pose(rig.t)[1])))
+    assert np.median(errors[-15 * 52:]) < 1.0
+
+
+@needs_vqf
+def test_vqf_warns_when_the_bias_is_above_its_limit(caplog):
+    cfg = make_cfg("vqf")
+    cfg.imu.vqf_bias_clip_dps = 5.0
+    rig = FusionRig(VirtualHead(seed=40, gyro_bias_dps=(-1.7, 6.0, 0.45)), cfg)
+    with caplog.at_level("WARNING", logger="neurocinema.fusion_vqf"):
+        rig.calibrate()
+    assert any("vqf_bias_clip_dps" in r.message for r in caplog.records)

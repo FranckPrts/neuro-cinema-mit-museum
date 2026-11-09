@@ -42,7 +42,7 @@ ROOT = HERE.parents[1]
 
 from recording import Event, Session, clipped, load_session, retime, timing  # noqa: E402
 
-from neurocinema.config import Config, ConfigError, _merge, load_config  # noqa: E402
+from neurocinema.config import Config, ConfigError, ImuConfig, _merge, load_config  # noqa: E402
 from neurocinema.engine import Engine  # noqa: E402
 
 DEFAULT_VARIANTS: dict[str, dict] = {
@@ -448,8 +448,9 @@ def stand_report(session: Session) -> str:
             mean, std = g.mean(axis=0), g.std(axis=0)
             lines.append(f"  on the stand: gyro mean (= raw bias) {np.round(mean, 2).tolist()} deg/s, "
                          f"std {np.round(std, 2).tolist()}, |acc| {np.linalg.norm(acc, axis=1).mean():.3f} g")
-            if np.max(np.abs(mean)) > 4.0:
-                lines.append("  ! a bias component is near or above vqf_bias_clip_dps (5): raise it for VQF")
+            clip = ImuConfig().vqf_bias_clip_dps
+            if np.max(np.abs(mean)) > 0.9 * clip:
+                lines.append(f"  ! a bias component is near or above vqf_bias_clip_dps ({clip:g}): raise it for VQF")
     clip = clipped(session.samples)
     if clip:
         order = sorted(phases.items(), key=lambda kv: kv[1])

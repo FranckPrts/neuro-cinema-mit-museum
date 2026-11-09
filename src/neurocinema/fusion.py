@@ -333,6 +333,11 @@ class Fusion:
         self._idle_bias = prev + k * (w - prev)
         self._idle_bias_t = t
 
+    def stand_still_s(self) -> float:
+        """Seconds of stillness off the head learned into the bias so far (the
+        bias is used once this reaches imu.idle_bias_min_s)."""
+        return self._idle_still_s
+
     def idle_bias(self) -> np.ndarray | None:
         """The bias learned off the head, or None if there is none usable now."""
         c = self.cfg

@@ -117,17 +117,6 @@ def main(argv: list[str] | None = None) -> int:
         source = make_headset_manager(cfg, simulated=args.sim_headsets)
         if source is None:
             return 4
-        if cfg.status_page.enabled:
-            from .statuspage import StatusPage
-
-            try:
-                page = StatusPage(source, cfg.status_page.host, cfg.status_page.port)
-            except OSError as e:
-                log.error("cannot serve the status page on %s:%d (%s)",
-                          cfg.status_page.host, cfg.status_page.port, e)
-                return 3
-            page.start()
-            closers.append(page.close)
     else:
         try:
             from .sources.lsl import LslImuSource
@@ -137,6 +126,21 @@ def main(argv: list[str] | None = None) -> int:
         source = LslImuSource(cfg.muse)
 
     app = App(cfg, source, out, commands=commands)
+
+    if cfg.status_page.enabled:
+        from .statuspage import StatusPage
+
+        managed = cfg.source.kind == "muse_direct"
+        try:
+            page = StatusPage(source if managed else None, cfg.status_page.host, cfg.status_page.port,
+                              engine=app.page)
+        except OSError as e:
+            log.error("cannot serve the status page on %s:%d (%s)", cfg.status_page.host, cfg.status_page.port, e)
+            if managed:
+                return 3  # staff need it to choose headsets
+        else:
+            page.start()
+            closers.append(page.close)
 
     if cfg.source.kind == "sim" and not args.no_keyboard and sys.stdin.isatty():
         from .sim.keyboard import SimKeyboard

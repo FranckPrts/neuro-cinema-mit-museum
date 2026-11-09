@@ -25,6 +25,33 @@ destinations = ["127.0.0.1:7000", "127.0.0.1:7003"]
 python viewer/nc_viewer.py --osc-port 7003
 ```
 
+**Calibration card** (top right): the room in use, then, once the engine
+sends `/nc/calib/imu`, the orientation backend, the gyro bias and where it came
+from (orange when it came from the 2 s worn mean instead of the stand), time
+since calibration, the yaw corrected since then (re-anchoring plus shake
+resets; orange above 12°, red above 30° = drift), and gyro samples at full
+scale. The dashed grey line is the calibration gaze (yaw 0, pitch 0). When the
+camera bench sends to the same port (`camera_bench.py --osc 127.0.0.1:7000`),
+the camera appears as a gold cone at its `camera.toml` position, aimed at its
+aim point, with its bearing, tilt, eye height and divider in the card. With both streams, the camera's gaze is a gold arrow next to the IMU's white
+one, and its target is hatched in gold (a whole column in head mode). The
+panel shows the camera's target, the share of time both picked the same target
+while both were tracking, and how many times they differed for more than 0.5 s
+(each one is logged). `b` makes the visitor's view (`v`) follow the camera
+instead of the IMU. A
+banner warns when the engine's screen angles differ from the viewer's, or the
+camera's eye height differs from `room.toml`.
+
+**Room check** (`r`, once per setup or after moving anything): the viewer
+says and shows "look at middle top", then the other five screen halves, then
+middle top again (2 s to turn, 2.5 s to hold each). For each, it averages
+every running backend's yaw and pitch and subtracts the true direction to the
+centre of that half, worked out from `room.toml`. The table shows the errors
+(orange above 6°, red above 15°) and the median per backend; the last row,
+middle top again, shows drift over the check. `c` copies it as CSV. Heads turn
+less than eyes, so a few degrees of yaw error toward the middle is normal for
+the IMU; a large error on one screen only usually means a wrong room number.
+
 Press `v` to toggle the visitor's own view. Reload the page after editing the
 target angles. Room: 16.5 x 16.5 ft, visitor centred on one edge, 2 ft in,
 yaw 0 straight across the room. Ceiling (10 ft) and eye height (1.6 m) are

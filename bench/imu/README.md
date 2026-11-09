@@ -94,7 +94,8 @@ The table shows:
 
 It first prints, per session, the sample rates, duplicate timestamps and gaps,
 and the gyro mean on the stand (the raw gyro bias). If any bias component is
-near 5 °/s, raise `imu.vqf_bias_clip_dps`, because VQF can't learn a bias above it.
+near `imu.vqf_bias_clip_dps` (10 °/s), it warns: raise that limit, because VQF
+can't learn a bias above it (it leaves pitch a few degrees off).
 
 Absolute errors also include how far people turn their head versus their eyes
 (heads usually turn less than the gaze), so compare variants rather than

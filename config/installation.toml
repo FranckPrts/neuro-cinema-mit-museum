@@ -42,12 +42,12 @@ swap_soon_minutes = 30.0      # ...or this estimated time left
 auto_adopt_after_s = 0.0      # fallback: use the only registered headset in range after this long; 0 = off
 
 [status_page]
-enabled = true
+enabled = true                # staff page: engine state, calibrate / put down / re-centre; headsets with muse_direct
 host = "127.0.0.1"            # "0.0.0.0" to reach it from a tablet on the same network
 port = 8081                   # 8080 is the 3D viewer (viewer/nc_viewer.py)
 
 [imu]
-backend = "complementary"     # orientation filter: "complementary" or "vqf" (pip install -e '.[vqf]')
+backend = "vqf"     # orientation filter: "complementary" or "vqf" (pip install -e '.[vqf]')
 forward_axis = "x"           # sensor axis pointing out of the forehead: x -x y -y z -z (verify on hardware)
 invert_yaw = false            # flip if turning right shows negative yaw
 invert_pitch = false          # flip if looking up shows negative pitch
@@ -68,7 +68,7 @@ vqf_tau_acc_s = 3.0           # accelerometer low-pass: larger = trust the gyro 
 vqf_rest_th_gyr_dps = 4.0     # rest detection: gyro deviation below this...
 vqf_rest_th_acc_ms2 = 1.0     # ...and accelerometer deviation below this (m/s^2)...
 vqf_rest_min_s = 1.0          # ...for this long
-vqf_bias_clip_dps = 5.0       # largest gyro bias VQF can represent; must exceed the headset's real bias
+vqf_bias_clip_dps = 10.0      # largest gyro bias VQF can represent; must exceed the headset's real bias (~6 deg/s seen)
 vqf_bias_from = "vqf"         # "vqf" (VQF's own estimate) or "stillness" (the idle/still bias above)
 vqf_bias_max_sigma_dps = 0.1  # calibration keeps VQF's bias if its uncertainty is below this
 

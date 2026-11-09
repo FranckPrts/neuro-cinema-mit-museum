@@ -100,8 +100,10 @@ class HeadsetsConfig:
 
 @dataclass
 class StatusPageConfig:
-    # Local web page for staff (muse_direct only). host "0.0.0.0" makes it
-    # reachable from a tablet on the same network.
+    # Local web page for staff: engine state and buttons (calibrate, headset put
+    # down, re-centre), plus headsets and battery with source.kind =
+    # "muse_direct". host "0.0.0.0" makes it reachable from a tablet on the
+    # same network.
     enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8081  # 8080 is the 3D viewer
@@ -148,7 +150,9 @@ class ImuConfig:
     vqf_rest_th_gyr_dps: float = 4.0
     vqf_rest_th_acc_ms2: float = 1.0
     vqf_rest_min_s: float = 1.0
-    vqf_bias_clip_dps: float = 5.0
+    # Muse gyros: up to ~6.5 deg/s on one axis measured on headset C (2026-11-09);
+    # the sensor's own spec allows +/-10 deg/s.
+    vqf_bias_clip_dps: float = 10.0
     # Gyro bias with VQF: "vqf" (its own estimate, learned at rest and during
     # motion; calibration keeps it under the idle-bias rules above and if its
     # uncertainty is below `vqf_bias_max_sigma_dps`, otherwise starts from the

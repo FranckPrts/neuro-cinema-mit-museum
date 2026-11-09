@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import threading
 import time
 from collections.abc import Callable
@@ -16,6 +17,40 @@ from .supervisor import MuseStreamSupervisor
 log = logging.getLogger(__name__)
 
 LOOP_HZ = 200.0
+
+# Engine commands the status page may send (see Engine.command).
+PAGE_COMMANDS = ("recalibrate", "idle", "reset")
+
+
+class PageLink:
+    """Between the status page's thread and the main loop: the engine's status
+    goes out (copied a few times a second), staff commands come in."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._status: dict = {}
+        self._commands: queue.SimpleQueue[str] = queue.SimpleQueue()
+
+    def publish(self, status: dict) -> None:
+        with self._lock:
+            self._status = status
+
+    def status(self) -> dict:
+        with self._lock:
+            return dict(self._status)
+
+    def submit(self, command: str) -> None:
+        if command not in PAGE_COMMANDS:
+            raise ValueError(f"unknown engine command {command!r}")
+        self._commands.put(command)
+
+    def drain(self) -> list[str]:
+        out = []
+        while True:
+            try:
+                out.append(self._commands.get_nowait())
+            except queue.Empty:
+                return out
 
 
 class App:
@@ -35,6 +70,7 @@ class App:
         self.supervisor = supervisor
         self.hooks = hooks or []
         self.engine = Engine(cfg, out)
+        self.page = PageLink()
         self.p = cfg.osc.prefix
         self.stop_event = threading.Event()
         self._started = time.monotonic()
@@ -70,10 +106,16 @@ class App:
         if self.commands:
             for name, args in self.commands.drain():
                 self.handle_command(name, args, now)
+        page_commands = self.page.drain()
+        for name in page_commands:
+            log.info("status page: %s", name)
+            self.handle_command(name, (), now)
         for hook in self.hooks:
             hook(now)
         self.engine.tick(now)
         self._emit_status(now)
+        if page_commands:
+            self.page.publish(self.engine.status(now))  # show the result at once
 
     def handle_command(self, name: str, args: tuple, now: float) -> None:
         log.info("command %s %s", name, " ".join(map(str, args)))
@@ -92,6 +134,7 @@ class App:
             self.out.send(f"{self.p}/heartbeat", round(mono - self._started, 1))
         if mono >= self._next_status:
             self._next_status = mono + 1.0 / self.cfg.osc.status_rate_hz
+            self.page.publish(self.engine.status(now))
             last = self.source.last_receive()
             age_ms = -1 if last is None else int((now - last) * 1000)
             motion = self.engine.fusion.stillness.gyro_range()
