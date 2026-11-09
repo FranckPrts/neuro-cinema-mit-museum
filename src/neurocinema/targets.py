@@ -80,18 +80,24 @@ class TargetTracker:
         return True
 
     def _classify_column(self, yaw: float) -> str | None:
-        cfg = self.cfg
-        h = cfg.yaw_hysteresis_deg
-        margin = cfg.outer_margin_deg + (h / 2 if self._column else -h / 2)
-        if yaw < cfg.left_yaw_deg - margin or yaw > cfg.right_yaw_deg + margin:
-            return None
-        nearest = min(COLUMNS, key=lambda c: abs(yaw - self._centres[c]))
+        """Columns between bounds (outer end, two boundaries, outer end), with
+        a dead band of yaw_hysteresis_deg around each boundary."""
+        lo, lm, mr, hi = self.cfg.bounds()
+        h2 = self.cfg.yaw_hysteresis_deg / 2
         current = self._column
-        if current is None or nearest == current:
-            return nearest
-        # Switch only once clearly past the boundary (by h/2 on each side).
-        if abs(yaw - self._centres[nearest]) + h < abs(yaw - self._centres[current]):
-            return nearest
+        out = h2 if current else -h2  # harder to enter than to stay
+        if yaw < lo - out or yaw > hi + out:
+            return None
+        plain = "left" if yaw < lm else ("middle" if yaw < mr else "right")
+        if current is None or plain == current:
+            return plain
+        # Switch only once clearly past the boundary next to the current column.
+        if current == "left":
+            return plain if yaw >= lm + h2 else current
+        if current == "right":
+            return plain if yaw < mr - h2 else current
+        if yaw < lm - h2 or yaw >= mr + h2:
+            return plain
         return current
 
     def _classify_row(self, pitch: float) -> str | None:

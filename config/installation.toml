@@ -77,12 +77,17 @@ still_s = 2.0                 # stillness needed, looking at the centre of the m
 slow_after_s = 15.0           # then send a `calibration_slow` event once
 
 [targets]
-# Placeholder geometry until the room is measured.
-left_yaw_deg = -40.0          # + = visitor's right
-middle_yaw_deg = 0.0
-right_yaw_deg = 40.0
+# Screen yaws come from the room (config/room.toml): left wall, front wall and
+# right wall screens, seen from the visitor's spot. One room for the engine,
+# the viewer and the camera bench. `python -m neurocinema.room` prints them.
+from_room = true
+room_file = "config/room.toml"  # relative: current folder, then the repo root
+# With from_room = false, these three give the screen centres instead (+ = visitor's right):
+# left_yaw_deg = -40.0
+# middle_yaw_deg = 0.0
+# right_yaw_deg = 40.0
 yaw_hysteresis_deg = 6.0      # dead band around each column boundary
-outer_margin_deg = 30.0       # beyond the outer screens by more than this = no target
+outer_margin_deg = 30.0       # from_room = false only: beyond the outer centres by more than this = no target
 split_pitch_deg = 0.0         # pitch of the top/bottom divider, relative to the calibration gaze
 pitch_hysteresis_deg = 4.0
 max_pitch_deg = 40.0

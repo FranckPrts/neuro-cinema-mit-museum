@@ -11,7 +11,7 @@ import importlib.util
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 AXIS_NAMES = ("x", "-x", "y", "-y", "z", "-z")
 
@@ -167,14 +167,21 @@ class CalibrationConfig:
 
 @dataclass
 class TargetsConfig:
-    # Yaw of each screen's centre, degrees, + = visitor's right.
-    # Placeholders until the room geometry is known.
+    # true: the screens' yaws (centres and edges) come from the room file, so
+    # the engine, the viewer and the camera bench share one room. false: use
+    # the three *_yaw_deg keys below (column boundaries halfway between them).
+    from_room: bool = True
+    # Relative paths are tried from the current folder, then the repo root.
+    room_file: str = "config/room.toml"
+    # Yaw of each screen's centre, degrees, + = visitor's right. Filled from
+    # the room file when from_room is true (setting them then is an error).
     left_yaw_deg: float = -40.0
     middle_yaw_deg: float = 0.0
     right_yaw_deg: float = 40.0
     # Width of the dead band around each column boundary.
     yaw_hysteresis_deg: float = 6.0
-    # Beyond the outer screens' centres by more than this = no target.
+    # from_room = false only: beyond the outer screens' centres by more than
+    # this = no target. With the room, no target = past the side screens' ends.
     outer_margin_deg: float = 30.0
     # Pitch of the horizontal divider relative to the calibration gaze.
     split_pitch_deg: float = 0.0
@@ -182,6 +189,17 @@ class TargetsConfig:
     pitch_hysteresis_deg: float = 4.0
     # Further than this above/below the divider = no target.
     max_pitch_deg: float = 40.0
+
+    # Set by load_config from the room (not a config key): (left outer end,
+    # left|middle, middle|right, right outer end), degrees.
+    column_bounds: ClassVar[tuple[float, float, float, float] | None] = None
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        if self.column_bounds is not None:
+            return self.column_bounds
+        m = self.outer_margin_deg
+        return (self.left_yaw_deg - m, (self.left_yaw_deg + self.middle_yaw_deg) / 2,
+                (self.middle_yaw_deg + self.right_yaw_deg) / 2, self.right_yaw_deg + m)
 
 
 @dataclass
@@ -350,18 +368,50 @@ def _merge(obj: Any, data: dict[str, Any], path: str) -> None:
             setattr(obj, key, _coerce(current, value, name))
 
 
-def load_config(paths: list[Path] | tuple[Path, ...] = ()) -> Config:
-    """Defaults, then each file in order (later files win)."""
+_YAW_KEYS = ("left_yaw_deg", "middle_yaw_deg", "right_yaw_deg")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_config(paths: list[Path] | tuple[Path, ...] = (), apply_room: bool = True) -> Config:
+    """Defaults, then each file in order (later files win), then the screen
+    yaws from the room file when targets.from_room is true."""
     cfg = Config()
+    yaw_set_in: Path | None = None
     for path in paths:
         with open(path, "rb") as f:
             try:
                 data = tomllib.load(f)
             except tomllib.TOMLDecodeError as e:
                 raise ConfigError(f"{path}: {e}") from e
+        if any(k in data.get("targets", {}) for k in _YAW_KEYS):
+            yaw_set_in = Path(path)
         try:
             _merge(cfg, data, "")
         except ConfigError as e:
             raise ConfigError(f"{path}: {e}") from e
+    if apply_room and cfg.targets.from_room:
+        if yaw_set_in is not None:
+            raise ConfigError(f"{yaw_set_in}: targets.*_yaw_deg are set but targets.from_room = true "
+                              "(the room file gives them); set from_room = false to use them")
+        apply_room_file(cfg.targets)
     cfg.validate()
     return cfg
+
+
+def apply_room_file(t: TargetsConfig) -> None:
+    """Screen centres and edges from the room file, into `t`."""
+    from .room import RoomError, load_room, screen_layout
+
+    path = Path(t.room_file)
+    if not path.is_absolute() and not path.exists():
+        path = _REPO_ROOT / path
+    if not path.exists():
+        raise ConfigError(f"targets.room_file: {t.room_file} not found (or set targets.from_room = false)")
+    try:
+        layout = screen_layout(load_room(path))
+    except RoomError as e:
+        raise ConfigError(f"targets.room_file: {e}") from e
+    t.left_yaw_deg = layout.centre["left"]
+    t.middle_yaw_deg = layout.centre["middle"]
+    t.right_yaw_deg = layout.centre["right"]
+    t.column_bounds = layout.bounds

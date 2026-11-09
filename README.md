@@ -83,10 +83,12 @@ and run `nc-monitor --port 7002`.
    must go **positive**. If not, set `imu.invert_yaw` / `imu.invert_pitch`. If
    pitch barely moves when looking up and down, the headset's forward axis is
    not `x`: try the others in `imu.forward_axis` (and recalibrate).
-4. Measure the room and set the screen angles in `[targets]`. For a screen
-   centre offset sideways by `d` metres at `D` metres from the standing spot,
-   the yaw is `atan(d / D)` in degrees. Set `split_pitch_deg` if the screens'
-   divider is not at the calibration gaze height.
+4. Measure the room and put it in `config/room.toml` (room size, where the
+   visitor stands, eye height, which walls have screens). The engine works out
+   the screens' yaws and edges from it (`[targets] from_room = true`), and the
+   viewer and camera bench use the same file; `python -m neurocinema.room`
+   prints the angles. Set `split_pitch_deg` if the screens' divider is not at
+   the calibration gaze height.
 5. Tune gestures with real visitors (see the checklist below). The
    `nod_ignored` events and the `motion` value in `nc-monitor` help.
 
@@ -233,6 +235,7 @@ ever written to disk.
 | `src/neurocinema/fusion_vqf.py` | optional VQF backend for "up" and the gyro bias (`imu.backend = "vqf"`) |
 | `src/neurocinema/gestures.py` | nod and shake detection |
 | `src/neurocinema/targets.py` | yaw/pitch → six targets, with hysteresis |
+| `src/neurocinema/room.py` | room and screens from `config/room.toml`: screen yaws for the targets, gaze hits for the viewer |
 | `src/neurocinema/engine.py` | the state machine and OSC messages |
 | `src/neurocinema/app.py` | main loop, status, commands |
 | `src/neurocinema/supervisor.py`, `musestream.py` | running and restarting muselsl |

@@ -6,3 +6,4 @@ logs/
 run/
 config/local.toml
 .DS_Store
+docs/*

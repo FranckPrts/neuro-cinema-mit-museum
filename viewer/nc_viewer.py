@@ -81,7 +81,8 @@ def make_handler(hub: Hub, config_paths: list[Path], room_path: Path):
             if self.path == "/config.json":
                 # Re-read on every page load, so a reload picks up edited angles.
                 try:
-                    body = json.dumps({"targets": asdict(load_config(config_paths).targets),
+                    targets = load_config(config_paths).targets
+                    body = json.dumps({"targets": asdict(targets), "bounds": list(targets.bounds()),
                                        "room": load_room(room_path)})
                 except (ConfigError, RoomError, OSError) as e:
                     self.send_error(500, str(e))

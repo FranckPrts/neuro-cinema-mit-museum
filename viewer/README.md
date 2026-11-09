@@ -54,10 +54,11 @@ Controls: `[` / `]` cone half-angle -/+ 1°; "load file" in the panel puts an
 image or video on every screen ("test card" goes back to the grid). URL
 parameters: `?cone=8`, `?tex=<image or video URL>`, `?view=visitor`.
 
-**Geometry** lives in `config/room.toml` (read by `room_geometry.py`, which the
-Python side can import later; `python viewer/room_geometry.py` prints a check
-table). It is a separate file because the engine's config loader rejects
-unknown sections. Pass another file with `--room`.
+**Geometry** lives in `config/room.toml`, read by `neurocinema.room` (the
+engine uses it too, for the screens' yaws and edges; `room_geometry.py` here
+just re-exports it). `python -m neurocinema.room` prints the screen angles and
+a check table. Pass another file with `--room`; the engine reads
+`[targets] room_file`, so keep the two the same.
 
 | key | default | |
 |---|---|---|

@@ -159,15 +159,12 @@ function wallRange(yawDeg) {
 }
 
 // --- target regions, painted on the walls -------------------------------
-// Same rules as TargetTracker: nearest column centre wins, outer screens end
-// outer_margin_deg past their centre; rows split at split_pitch_deg, limited
-// by max_pitch_deg.
+// Same rules as TargetTracker: columns between the engine's bounds (from the
+// room: the screens' edges; else halfway between centres); rows split at
+// split_pitch_deg, limited by max_pitch_deg.
 const centres = { left: cfg.left_yaw_deg, middle: cfg.middle_yaw_deg, right: cfg.right_yaw_deg };
-const colRange = {
-  left: [centres.left - cfg.outer_margin_deg, (centres.left + centres.middle) / 2],
-  middle: [(centres.left + centres.middle) / 2, (centres.middle + centres.right) / 2],
-  right: [(centres.middle + centres.right) / 2, centres.right + cfg.outer_margin_deg],
-};
+const [bLo, bLM, bMR, bHi] = conf.bounds;
+const colRange = { left: [bLo, bLM], middle: [bLM, bMR], right: [bMR, bHi] };
 const rowPitch = {
   top: [cfg.split_pitch_deg, cfg.split_pitch_deg + cfg.max_pitch_deg],
   bottom: [cfg.split_pitch_deg - cfg.max_pitch_deg, cfg.split_pitch_deg],
