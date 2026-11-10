@@ -42,7 +42,8 @@ If `pylsl` cannot find the LSL library, install it (macOS:
 nc-engine --sim
 ```
 
-Keys: arrows to turn and look up/down, `1 2 3` face left/middle/right, `t b`
+Keys: arrows to turn and look up/down, `1 2 3` face left/middle/right (the
+active selection setup's centres), `s` next selection setup, `t b`
 top/bottom, `n` nod, `h` shake, `o` take the headset off/put it on, `c` drop
 the connection, `q` quit. The virtual head starts idle: move it (or press `o`
 twice) to start calibration, then keep still for 2 s.
@@ -192,20 +193,29 @@ the default.
 - Each selection pulls yaw halfway back to that screen's centre, so drift
   rarely builds up. The shake is the visitor's manual fix.
 - Pitch (top/bottom) is measured against gravity and does not drift.
+- Which yaw picks which column comes from the active **selection setup**: the
+  built-in one (`room`: the screens' edges; `manual` with `from_room = false`)
+  or a named one in `config/selection_setups.toml`, where each column has its
+  own `[lo, hi]` yaw range. Ranges may overlap (the head keeps the column it
+  came from across the shared zone) or leave gaps (no target). `[targets] setup`
+  picks the one at startup, `nc-engine --setup <name>` overrides it, and
+  `/nc/cmd/setup <name>` (or the viewer's dropdown, or `s` in the simulator)
+  switches while running without recalibrating. `/nc/target` and `/nc/selected`
+  are unchanged; only which angles map to which column changes.
 - While the headset lies still on its stand (`idle`), the engine learns the
   gyro bias. Calibration starts from it, so a visitor who sways or drifts a
   little during "keep still" doesn't spoil it. It is kept across a dropout of
   the same headset and dropped when the headset changes (`imu.idle_bias_*`).
 
-### Orientation backend (experimental)
+### Orientation backend
 
-`imu.backend = "vqf"` swaps the complementary filter for
-[VQF](https://vqf.readthedocs.io), which estimates "up" and the gyro bias with
-a different method (accelerometer filtered in a near-inertial frame, Kalman
-bias estimate). Only those two estimates change: yaw, gestures, targets and
-re-centring are shared. It needs `pip install -e ".[vqf]"`. The complementary
-filter stays the default until recordings from the headset show VQF is better
-(`bench/imu/`). VQF can only follow a gyro bias up to `imu.vqf_bias_clip_dps`
+The default, `imu.backend = "vqf"`, uses [VQF](https://vqf.readthedocs.io),
+which estimates "up" and the gyro bias with an accelerometer filtered in a
+near-inertial frame and a Kalman bias estimate. `imu.backend = "complementary"`
+switches back to the complementary filter (the default until 2026-11-10). Only
+those two estimates differ: yaw, gestures, targets and re-centring are shared.
+`bench/imu/` replays headset recordings through both to compare them. VQF can
+only follow a gyro bias up to `imu.vqf_bias_clip_dps`
 per axis (10 °/s; headset C has about 6 °/s on one axis). Above it pitch is
 off by a few degrees, and the engine logs a warning at calibration.
 
@@ -227,9 +237,10 @@ Engine → TouchDesigner (default `127.0.0.1:7000`):
 | `/nc/dwell` | 0.0 to 1.0 | 30 Hz in `active`; reaches 1.0 when a nod would be accepted |
 | `/nc/calibration` | 0.0 to 1.0 | 30 Hz in `calibrating` |
 | `/nc/pose` | yaw, pitch, roll (degrees) | 30 Hz while tracking. + = right / up / right ear down |
-| `/nc/event` | name [args] | `engine_started`, `engine_stopped`, `calibrated`, `calibration_slow`, `nod`, `shake`, `reset`, `selected <col> <row>`, `nod_ignored <watching\|no_target\|dwell>` |
+| `/nc/event` | name [args] | `engine_started`, `engine_stopped`, `calibrated`, `calibration_slow`, `nod`, `shake`, `reset`, `selected <col> <row>`, `nod_ignored <watching\|no_target\|dwell>`, `setup <name>` |
 | `/nc/calib/imu` | backend, bias_source (`idle` `worn` `vqf` `none`), bias_dps (float), since_s (float, -1 = not calibrated), yaw_corrected_deg (float: re-anchoring + shake resets since calibration; large = drift), clipped (int: gyro samples at full scale since calibration) | on calibration, `/cmd/snapshot`, and every 5 s |
 | `/nc/calib/room` | from_room (0/1), room_hash (string), left, middle, right screen centre yaws, then column bounds lo, left\|middle, middle\|right, hi (degrees) | same |
+| `/nc/setup` | name, then yaw ranges left lo hi, middle lo hi, right lo hi, then column centres left middle right, split_pitch, max_pitch (degrees) | on a switch, every second, and with `/nc/calib/*` |
 
 TouchDesigner → engine (default `127.0.0.1:7001`):
 
@@ -242,6 +253,7 @@ TouchDesigner → engine (default `127.0.0.1:7001`):
 | `/nc/cmd/restart_stream` | restart muselsl (not counted as a failure) |
 | `/nc/cmd/ping` [args] | replies `/nc/pong` [args] |
 | `/nc/cmd/snapshot` | re-send state, phase and target now |
+| `/nc/cmd/setup` [name] | switch selection setup (sends `/nc/target none none`, then re-classifies; yaw and calibration are kept). Unknown name: a warning, no change. No name: re-read `config/selection_setups.toml` and re-apply the active setup |
 
 TouchDesigner tips: string messages (`/state`, `/target`, `/event`) need an
 **OSC In DAT**; numeric ones (`/pose`, `/dwell`, `/calibration`, `/status`)
@@ -286,6 +298,7 @@ ever written to disk.
 | `src/neurocinema/fusion_vqf.py` | optional VQF backend for "up" and the gyro bias (`imu.backend = "vqf"`) |
 | `src/neurocinema/gestures.py` | nod and shake detection |
 | `src/neurocinema/targets.py` | yaw/pitch → six targets, with hysteresis |
+| `src/neurocinema/setups.py`, `config/selection_setups.toml` | named selection setups: the yaw range of each column |
 | `src/neurocinema/room.py` | room and screens from `config/room.toml`: screen yaws for the targets, gaze hits for the viewer |
 | `src/neurocinema/engine.py` | the state machine and OSC messages |
 | `src/neurocinema/app.py` | main loop, status, commands |

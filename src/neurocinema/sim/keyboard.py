@@ -5,14 +5,18 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from ..config import TargetsConfig
 from ..sources.sim import SimSource
+
+if TYPE_CHECKING:
+    from ..engine import Engine
 
 HELP = """\
 simulator keys:
   arrows / a d w x   turn left/right, look up/down
-  1 2 3              face left / middle / right screen
+  1 2 3              face left / middle / right column (active setup's centres)
+  s                  next selection setup
   t b                look at top / bottom half
   0                  look straight ahead (calibration pose)
   n                  nod (confirm)
@@ -78,10 +82,12 @@ class KeyReader:
 class SimKeyboard:
     """An App hook: reads keys each loop and moves the virtual head."""
 
-    def __init__(self, source: SimSource, targets: TargetsConfig, quit_: Callable[[], None]):
+    COLUMN_KEYS = {"1": "left", "2": "middle", "3": "right"}
+
+    def __init__(self, source: SimSource, engine: Engine, quit_: Callable[[], None]):
         self.source = source
+        self.engine = engine
         self.head = source.head
-        self.columns = {"1": targets.left_yaw_deg, "2": targets.middle_yaw_deg, "3": targets.right_yaw_deg}
         self.quit = quit_
         self.reader = KeyReader()
         print(HELP, file=sys.stderr)
@@ -103,8 +109,14 @@ class SimKeyboard:
             h.look(pitch=h.target_pitch + 6)
         elif key in ("down", "x"):
             h.look(pitch=h.target_pitch - 6)
-        elif key in self.columns:
-            h.look(yaw=self.columns[key])
+        elif key in self.COLUMN_KEYS:
+            h.look(yaw=self.engine.targets.column_centre(self.COLUMN_KEYS[key]))
+        elif key == "s":
+            names = list(self.engine.setups)
+            i = names.index(self.engine.setup_name) if self.engine.setup_name in names else -1
+            self.engine.command("setup", (names[(i + 1) % len(names)],), now)
+            self._say(f"setup {self.engine.setup_name}: {self.engine.targets.setup.describe()}")
+            return
         elif key == "t":
             h.look(pitch=12)
         elif key == "b":

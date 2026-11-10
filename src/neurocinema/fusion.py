@@ -427,7 +427,8 @@ def make_fusion(cfg: ImuConfig) -> Fusion:
         except ModuleNotFoundError as e:
             if e.name != "vqf":
                 raise
-            raise ConfigError("imu.backend = 'vqf' needs the vqf package: pip install -e '.[vqf]'") from e
+            raise ConfigError("imu.backend = 'vqf' needs the vqf package: pip install -e . "
+                              "(or set imu.backend = 'complementary')") from e
         return VqfFusion(cfg)
     if cfg.backend != "complementary":
         raise ConfigError(f"unknown imu.backend {cfg.backend!r}")

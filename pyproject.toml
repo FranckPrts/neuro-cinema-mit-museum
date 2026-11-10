@@ -12,6 +12,9 @@ dependencies = [
     "numpy>=1.26",
     "python-osc>=1.8",
     "psutil>=5.9",
+    # Default orientation backend (imu.backend = "vqf"). Wheels exist for
+    # macOS arm64 / CPython 3.12; elsewhere it builds C++ (Xcode command line tools).
+    "vqf>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -23,11 +26,8 @@ muse = [
 dev = [
     "pytest>=8",
 ]
-# Optional orientation backend (imu.backend = "vqf"). Wheels exist for
-# macOS arm64 / CPython 3.12; elsewhere it builds C++ (Xcode command line tools).
-vqf = [
-    "vqf>=2.1",
-]
+# Kept so `pip install -e '.[vqf]'` still works; vqf is a core dependency now.
+vqf = []
 
 [project.scripts]
 nc-engine = "neurocinema.cli:main"

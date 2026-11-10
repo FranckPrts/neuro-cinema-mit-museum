@@ -15,7 +15,7 @@ from pythonosc.osc_server import BlockingOSCUDPServer
 
 CONTINUOUS = ("pose", "dwell", "calibration", "status", "status/stream", "heartbeat")
 # Re-sent every second by the snapshot; only print them when they change.
-SNAPSHOT = ("state", "phase", "target")
+SNAPSHOT = ("state", "phase", "target", "setup")
 
 
 class Monitor:

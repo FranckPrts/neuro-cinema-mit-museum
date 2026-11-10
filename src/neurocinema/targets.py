@@ -1,8 +1,10 @@
 """Which of the six screen halves the visitor is facing.
 
-Three screens (left / middle / right) chosen by yaw, each split horizontally
-(top / bottom) chosen by pitch. Both use hysteresis so the highlight does not
-flicker when the head rests near a boundary.
+Three columns (left / middle / right) chosen by yaw, each split horizontally
+(top / bottom) chosen by pitch. The yaw range of each column comes from the
+active selection setup (`setups.py`); neighbouring ranges may overlap, and the
+head stays in its column across the shared zone, so the highlight does not
+flicker when the head rests near a boundary. Rows use a dead band likewise.
 """
 
 from __future__ import annotations
@@ -11,8 +13,8 @@ from collections import deque
 from dataclasses import dataclass
 
 from .config import TargetsConfig
+from .setups import COLUMNS, SelectionSetup, builtin_setup
 
-COLUMNS = ("left", "middle", "right")
 ROWS = ("top", "bottom")
 
 
@@ -26,13 +28,16 @@ class Target:
 
 
 class TargetTracker:
-    def __init__(self, cfg: TargetsConfig):
+    """`cfg` gives the hysteresis; `setup` the columns (default: the built-in one)."""
+
+    def __init__(self, cfg: TargetsConfig, setup: SelectionSetup | None = None):
         self.cfg = cfg
-        self._centres = {
-            "left": cfg.left_yaw_deg,
-            "middle": cfg.middle_yaw_deg,
-            "right": cfg.right_yaw_deg,
-        }
+        self.setup = setup or builtin_setup(cfg)
+        self.reset()
+
+    def set_setup(self, setup: SelectionSetup) -> None:
+        """Switch to another selection setup; the target starts again from none."""
+        self.setup = setup
         self.reset()
 
     HISTORY_S = 10.0
@@ -46,7 +51,7 @@ class TargetTracker:
         self._history: deque[tuple[float, Target | None]] = deque()
 
     def column_centre(self, column: str) -> float:
-        return self._centres[column]
+        return self.setup.centres[column]
 
     def dwell(self, t: float) -> float:
         if self.current is None or self.since is None:
@@ -80,31 +85,36 @@ class TargetTracker:
         return True
 
     def _classify_column(self, yaw: float) -> str | None:
-        """Columns between bounds (outer end, two boundaries, outer end), with
-        a dead band of yaw_hysteresis_deg around each boundary."""
-        lo, lm, mr, hi = self.cfg.bounds()
-        h2 = self.cfg.yaw_hysteresis_deg / 2
+        """Stay in the current column while inside its range (overlaps are the
+        hysteresis); otherwise the column whose range holds the yaw, and in an
+        overlap entered from elsewhere, the zone's midpoint decides. Outside
+        every range: none. The outer ends are yaw_hysteresis_deg / 2 harder to
+        enter than to stay in."""
+        ranges = self.setup.ranges
         current = self._column
-        out = h2 if current else -h2  # harder to enter than to stay
-        if yaw < lo - out or yaw > hi + out:
-            return None
-        plain = "left" if yaw < lm else ("middle" if yaw < mr else "right")
-        if current is None or plain == current:
-            return plain
-        # Switch only once clearly past the boundary next to the current column.
-        if current == "left":
-            return plain if yaw >= lm + h2 else current
-        if current == "right":
-            return plain if yaw < mr - h2 else current
-        if yaw < lm - h2 or yaw >= mr + h2:
-            return plain
-        return current
+        h2 = self.cfg.yaw_hysteresis_deg / 2
+        out = h2 if current else -h2
+
+        def inside(col: str) -> bool:
+            lo, hi = ranges[col]
+            if col == COLUMNS[0]:
+                lo -= out
+            if col == COLUMNS[-1]:
+                return lo <= yaw <= hi + out
+            return lo <= yaw < hi
+
+        if current is not None and inside(current):
+            return current
+        hits = [c for c in COLUMNS if inside(c)]
+        if len(hits) < 2:
+            return hits[0] if hits else None
+        a, b = hits[0], hits[-1]  # neighbours (only they may overlap)
+        return a if yaw < (ranges[b][0] + ranges[a][1]) / 2 else b
 
     def _classify_row(self, pitch: float) -> str | None:
-        cfg = self.cfg
-        h = cfg.pitch_hysteresis_deg
-        d = pitch - cfg.split_pitch_deg
-        limit = cfg.max_pitch_deg + (h / 2 if self._row else -h / 2)
+        h = self.cfg.pitch_hysteresis_deg
+        d = pitch - self.setup.split_pitch_deg
+        limit = self.setup.max_pitch_deg + (h / 2 if self._row else -h / 2)
         if abs(d) > limit:
             return None
         current = self._row

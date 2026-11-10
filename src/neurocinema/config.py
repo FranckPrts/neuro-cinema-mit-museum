@@ -111,10 +111,11 @@ class StatusPageConfig:
 
 @dataclass
 class ImuConfig:
-    # Orientation backend: "complementary" (the filter below) or "vqf" (needs
-    # the optional extra: pip install -e '.[vqf]'). VQF only replaces how "up"
-    # and the gyro bias are estimated; yaw, gestures and targets are shared.
-    backend: str = "complementary"
+    # Orientation backend: "vqf" (https://vqf.readthedocs.io) or
+    # "complementary" (the filter below, the default until 2026-11-10). VQF
+    # only replaces how "up" and the gyro bias are estimated; yaw, gestures
+    # and targets are shared.
+    backend: str = "vqf"
     # Sensor axis pointing out of the forehead. Verify on the real headset.
     forward_axis: str = "x"
     invert_yaw: bool = False
@@ -193,6 +194,13 @@ class TargetsConfig:
     pitch_hysteresis_deg: float = 4.0
     # Further than this above/below the divider = no target.
     max_pitch_deg: float = 40.0
+    # Selection setup active at startup: a name from setups_file, or empty for
+    # the built-in one ("room" with from_room, else "manual"), which uses the
+    # bounds above. Switchable at runtime with /<prefix>/cmd/setup <name>.
+    setup: str = ""
+    # Named selection setups (yaw range of each column). Relative: current
+    # folder, then the repo root.
+    setups_file: str = "config/selection_setups.toml"
 
     # Set by load_config from the room (not a config key): (left outer end,
     # left|middle, middle|right, right outer end), degrees.
@@ -307,7 +315,8 @@ class Config:
         if self.imu.vqf_bias_from not in ("vqf", "stillness"):
             raise ConfigError("imu.vqf_bias_from must be 'vqf' or 'stillness'")
         if self.imu.backend == "vqf" and importlib.util.find_spec("vqf") is None:
-            raise ConfigError("imu.backend = 'vqf' needs the vqf package: pip install -e '.[vqf]'")
+            raise ConfigError("imu.backend = 'vqf' needs the vqf package: pip install -e . "
+                              "(or set imu.backend = 'complementary')")
         t = self.targets
         if not t.left_yaw_deg < t.middle_yaw_deg < t.right_yaw_deg:
             raise ConfigError("targets: expected left_yaw_deg < middle_yaw_deg < right_yaw_deg")
@@ -403,13 +412,19 @@ def load_config(paths: list[Path] | tuple[Path, ...] = (), apply_room: bool = Tr
     return cfg
 
 
+def resolve_path(name: str) -> Path:
+    """A config-relative file: as given (current folder), else from the repo root."""
+    path = Path(name)
+    if not path.is_absolute() and not path.exists():
+        path = _REPO_ROOT / path
+    return path
+
+
 def apply_room_file(t: TargetsConfig) -> None:
     """Screen centres and edges from the room file, into `t`."""
     from .room import RoomError, load_room, screen_layout
 
-    path = Path(t.room_file)
-    if not path.is_absolute() and not path.exists():
-        path = _REPO_ROOT / path
+    path = resolve_path(t.room_file)
     if not path.exists():
         raise ConfigError(f"targets.room_file: {t.room_file} not found (or set targets.from_room = false)")
     import hashlib

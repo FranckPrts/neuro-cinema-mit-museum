@@ -22,8 +22,7 @@ OWN_BIAS = ["complementary", VQF_STILLNESS]  # idle-bias logic is the filter's o
 
 def make_cfg(variant: str = "complementary") -> Config:
     cfg = Config()
-    if variant != "complementary":
-        cfg.imu.backend = "vqf"
+    cfg.imu.backend = "complementary" if variant == "complementary" else "vqf"
     if variant == "vqf-stillness":
         cfg.imu.vqf_bias_from = "stillness"
     return cfg

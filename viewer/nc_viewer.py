@@ -7,6 +7,9 @@ browser page over Server-Sent Events. Standard library + python-osc only.
 
 Port 7000 can only be bound by one program. To run alongside TouchDesigner
 or nc-monitor, add "127.0.0.1:7003" to osc.destinations and pass --osc-port 7003.
+
+The setup dropdown sends /<prefix>/cmd/setup <name> to the engine's
+osc.listen_host:listen_port; the page redraws when the engine's /setup comes back.
 """
 
 from __future__ import annotations
@@ -23,15 +26,18 @@ from pathlib import Path
 
 from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import ThreadingOSCUDPServer
+from pythonosc.udp_client import SimpleUDPClient
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from neurocinema.config import ConfigError, load_config  # noqa: E402
+from neurocinema.setups import load_setups, startup_name  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from room_geometry import RoomError, load_room
 
 STATIC = Path(__file__).resolve().parent / "static"
+MAX_BODY = 4096
 CONFIG_FILES = (ROOT / "config/installation.toml", ROOT / "config/local.toml")
 ROOM_FILE = ROOT / "config/room.toml"
 
@@ -82,8 +88,11 @@ def make_handler(hub: Hub, config_paths: list[Path], room_path: Path):
                 # Re-read on every page load, so a reload picks up edited angles.
                 try:
                     targets = load_config(config_paths).targets
+                    setups = load_setups(targets)
                     body = json.dumps({"targets": asdict(targets), "bounds": list(targets.bounds()),
-                                       "room": load_room(room_path)})
+                                       "room": load_room(room_path),
+                                       "setups": {n: s.as_json() for n, s in setups.items()},
+                                       "active": startup_name(targets, setups)})
                 except (ConfigError, RoomError, OSError) as e:
                     self.send_error(500, str(e))
                     return
@@ -92,6 +101,32 @@ def make_handler(hub: Hub, config_paths: list[Path], room_path: Path):
                 self._stream()
             else:
                 super().do_GET()
+
+        def do_POST(self):
+            # JSON only: a cross-site form cannot send it without a CORS preflight,
+            # which this server does not answer.
+            length = int(self.headers.get("Content-Length") or 0)
+            if self.path != "/api/setup":
+                self.send_error(404)
+                return
+            if length > MAX_BODY or self.headers.get_content_type() != "application/json":
+                self.send_error(400, "expected a small JSON body")
+                return
+            try:
+                name = json.loads(self.rfile.read(length) or b"{}").get("name")
+            except (ValueError, AttributeError):
+                name = None
+            if not isinstance(name, str):
+                self.send_error(400, 'expected {"name": "<setup>"}')
+                return
+            try:
+                osc = load_config(config_paths).osc
+            except (ConfigError, OSError) as e:
+                self.send_error(500, str(e))
+                return
+            # The engine checks the name (unknown: a warning, nothing changes).
+            SimpleUDPClient(osc.listen_host, osc.listen_port).send_message(f"{osc.prefix}/cmd/setup", name)
+            self._send(b'{"ok": true}', "application/json")
 
         def _send(self, body: bytes, ctype: str):
             self.send_response(200)
@@ -139,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
 
     config_paths = args.config or [c for c in CONFIG_FILES if c.exists()]
     try:
-        load_config(config_paths)
+        cfg = load_config(config_paths)
+        load_setups(cfg.targets)
         load_room(args.room)
     except (ConfigError, RoomError) as e:
         print(f"config error: {e}", file=sys.stderr)

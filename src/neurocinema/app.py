@@ -11,6 +11,7 @@ from collections.abc import Callable
 from .config import Config
 from .engine import Engine, Output
 from .osc import OscCommandServer
+from .setups import SelectionSetup
 from .sources.base import ImuSource
 from .supervisor import MuseStreamSupervisor
 
@@ -62,6 +63,7 @@ class App:
         commands: OscCommandServer | None = None,
         supervisor: MuseStreamSupervisor | None = None,
         hooks: list[Callable[[float], None]] | None = None,
+        setups: dict[str, SelectionSetup] | None = None,
     ):
         self.cfg = cfg
         self.source = source
@@ -69,7 +71,7 @@ class App:
         self.commands = commands
         self.supervisor = supervisor
         self.hooks = hooks or []
-        self.engine = Engine(cfg, out)
+        self.engine = Engine(cfg, out, setups)
         self.page = PageLink()
         self.p = cfg.osc.prefix
         self.stop_event = threading.Event()

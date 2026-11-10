@@ -78,7 +78,7 @@ python bench/imu/replay.py bench/imu/recordings/P0* --report docs/imu-backend-re
 
 Each variant runs the whole engine (fusion, gestures, targets, state machine,
 re-anchoring) on the recording. The default variants are `baseline` (no idle
-bias, as before), `complementary` (today's default), `vqf` and `vqf-stillness`.
+bias, as before), `complementary` (the default until 2026-11-10; `vqf` since), `vqf` and `vqf-stillness`.
 The table shows:
 
 - `calib s`, `bias`: time from "put on" to calibration, and where the bias came

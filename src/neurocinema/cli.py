@@ -12,6 +12,7 @@ from pathlib import Path
 from .app import App
 from .config import Config, ConfigError, load_config
 from .osc import OscCommandServer, OscOutput
+from .setups import load_setups, startup_name
 
 log = logging.getLogger("neurocinema")
 
@@ -77,6 +78,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="do not launch muselsl; read LSL streams published by something else")
     p.add_argument("--sim-headsets", action="store_true",
                    help="in-process headset manager with four simulated headsets (try the status page)")
+    p.add_argument("--setup", metavar="NAME",
+                   help="selection setup to start with (overrides targets.setup; names in "
+                        "config/selection_setups.toml, or the built-in 'room' / 'manual')")
     p.add_argument("--log-level", help="DEBUG, INFO, WARNING ...")
     return p.parse_args(argv)
 
@@ -86,6 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     paths = args.config or [p for p in (DEFAULT_CONFIG, LOCAL_CONFIG) if p.exists()]
     try:
         cfg = load_config(paths)
+        if args.setup is not None:
+            cfg.targets.setup = args.setup
+        setups = load_setups(cfg.targets)
+        startup_name(cfg.targets, setups)
     except (ConfigError, OSError) as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2
@@ -125,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             return 4
         source = LslImuSource(cfg.muse)
 
-    app = App(cfg, source, out, commands=commands)
+    app = App(cfg, source, out, commands=commands, setups=setups)
 
     if cfg.status_page.enabled:
         from .statuspage import StatusPage
@@ -145,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.source.kind == "sim" and not args.no_keyboard and sys.stdin.isatty():
         from .sim.keyboard import SimKeyboard
 
-        kb = SimKeyboard(source, cfg.targets, app.stop_event.set)
+        kb = SimKeyboard(source, app.engine, app.stop_event.set)
         app.hooks.append(kb)
         closers.append(kb.close)
 

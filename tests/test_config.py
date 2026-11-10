@@ -10,7 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_installation_toml_mirrors_defaults():
     # Without the room step, which fills the screen yaws from config/room.toml.
-    assert asdict(load_config([ROOT / "config" / "installation.toml"], apply_room=False)) == asdict(Config())
+    # The site picks a selection setup; the default is the built-in one.
+    site = asdict(load_config([ROOT / "config" / "installation.toml"], apply_room=False))
+    assert site["targets"].pop("setup") == "narrow-centre"
+    defaults = asdict(Config())
+    defaults["targets"].pop("setup")
+    assert site == defaults
 
 
 def test_later_files_override(tmp_path):

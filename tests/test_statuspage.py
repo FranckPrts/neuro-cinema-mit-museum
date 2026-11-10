@@ -62,7 +62,9 @@ def run(app: App, seconds: float) -> None:
 
 def test_page_buttons_drive_the_engine():
     out = EventsOut()
-    app = App(Config(), StepSource(VirtualHead(seed=5, worn=False)), out)
+    cfg = Config()
+    cfg.imu.backend = "complementary"  # its own stand bias: bias_source "idle" below
+    app = App(cfg, StepSource(VirtualHead(seed=5, worn=False)), out)
     run(app, 7.0)  # on its stand
     status = app.engine.status(app.source.now())
     assert status["state"] == "idle"

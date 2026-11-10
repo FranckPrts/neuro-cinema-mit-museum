@@ -1,0 +1,30 @@
+# Named selection setups: the yaw range of each column, independent of the room.
+#
+# One table per setup. Each column has its own [lo, hi] yaw range in degrees
+# (+ = visitor's right, 0 = the calibration gaze at the middle screen), so
+# ranges may overlap or leave gaps:
+#   - overlap: the head stays in the column it came from across the shared
+#     zone; entered with no target, the zone's midpoint decides;
+#   - gap, or past the outer ends: no target. The outer ends are
+#     yaw_hysteresis_deg / 2 harder to enter than to stay in.
+# Only neighbours may overlap (left with middle, middle with right).
+#
+# Optional per setup:
+#   centres = [l, m, r]   re-anchoring target on a selection, and sim keys 1 2 3
+#                         (default: the middle of each range)
+#   split_pitch_deg, max_pitch_deg   (default: the [targets] values)
+#
+# The built-in setup needs no entry: "room" (targets.from_room = true: the
+# screens' edges from config/room.toml) or "manual" (from_room = false).
+# [targets] setup picks the one active at startup; `nc-engine --setup <name>`
+# overrides it for one run. Switch while running with /nc/cmd/setup <name>
+# (TouchDesigner), the viewer's dropdown or `s` in the simulator;
+# /nc/cmd/setup with no name re-reads this file.
+
+# A narrow middle (+-15 deg, with a 6 deg overlap at each edge) and the side
+# columns reaching 60 deg out.
+[narrow-centre]
+left    = [-60, -12]
+middle  = [-18, 18]
+right   = [12, 60]
+centres = [-30, 0, 30]

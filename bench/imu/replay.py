@@ -10,7 +10,7 @@ re-anchoring) on the recorded samples, with a stub output, exactly as
 nc-engine would have. Default variants:
 
   baseline       complementary filter without the idle bias (before step 1)
-  complementary  the default engine
+  complementary  the complementary filter (the engine's default until 2026-11-10)
   vqf            VQF for "up" and the gyro bias
   vqf-stillness  VQF for "up", the complementary filter's bias logic
 

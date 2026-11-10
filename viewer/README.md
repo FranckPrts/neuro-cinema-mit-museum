@@ -1,9 +1,11 @@
 # nc-viewer
 
 A 3D view of the room in the browser: the visitor's head (with the Muse band),
-a gaze arrow, the six target regions painted on the walls from
-`config/installation.toml` (+ `config/local.toml`), and the floor rays at each
-column boundary (faint rays = hysteresis band, yellow = screen centres).
+a gaze arrow, the six target regions painted on the walls from the active
+selection setup, and floor rays at each column's range edges (in the
+column's colour; grey = column centres, faint = where the outer ends are
+entered / kept). Overlapping columns are drawn as overlapping translucent
+strips, so the shared zone shows brighter.
 The faced target lights up and fills with dwell; a selection flashes; events
 are listed in the panel. Separate from `nc-monitor`, which is unchanged.
 
@@ -51,6 +53,14 @@ centre of that half, worked out from `room.toml`. The table shows the errors
 middle top again, shows drift over the check. `c` copies it as CSV. Heads turn
 less than eyes, so a few degrees of yaw error toward the middle is normal for
 the IMU; a large error on one screen only usually means a wrong room number.
+
+**Selection setup** (panel, under phase): the dropdown lists the setups from
+`config/selection_setups.toml` plus the built-in one. Choosing one sends
+`/nc/cmd/setup <name>` to the engine (`osc.listen_host:listen_port` from the
+config); the regions are redrawn when the engine's `/nc/setup` comes back, so
+the page always shows what the engine uses (also after a switch from
+TouchDesigner or the simulator's `s`). "reload" asks the engine to re-read the
+file. The ranges of the active setup are listed below the dropdown.
 
 Press `v` to toggle the visitor's own view. Reload the page after editing the
 target angles. Room: 16.5 x 16.5 ft, visitor centred on one edge, 2 ft in,

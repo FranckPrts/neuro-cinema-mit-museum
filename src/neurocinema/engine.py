@@ -25,6 +25,7 @@ from .config import Config
 from .fusion import CalibrationError, Calibrator, make_fusion
 from .gestures import Gesture, OscillationDetector
 from .samples import ImuSample
+from .setups import SelectionSetup, SetupError, load_setups, startup_name
 from .targets import Target, TargetTracker
 
 log = logging.getLogger(__name__)
@@ -57,12 +58,16 @@ class Output(Protocol):
 
 
 class Engine:
-    def __init__(self, cfg: Config, out: Output):
+    def __init__(self, cfg: Config, out: Output, setups: dict[str, SelectionSetup] | None = None):
+        """`setups`: the selection setups (default: loaded from targets.setups_file)."""
         self.cfg = cfg
         self.out = out
         self.p = cfg.osc.prefix
         self.fusion = make_fusion(cfg.imu)
-        self.targets = TargetTracker(cfg.targets)
+        self.setups = setups if setups is not None else load_setups(cfg.targets)
+        self.setup_name = startup_name(cfg.targets, self.setups)
+        log.info("selection setup %s: %s", self.setup_name, self.setups[self.setup_name].describe())
+        self.targets = TargetTracker(cfg.targets, self.setups[self.setup_name])
         self.nod = OscillationDetector("nod", cfg.gestures.nod)
         self.shake = OscillationDetector("shake", cfg.gestures.shake)
         self.calibrator = Calibrator(cfg.calibration.still_s)
@@ -211,8 +216,42 @@ class Engine:
         elif name == "snapshot":
             self.emit_snapshot()
             self.emit_calibration(now)
+        elif name == "setup":
+            self._command_setup(str(args[0]) if args else "")
         else:
             log.warning("unknown command %r", name)
+
+    def _command_setup(self, name: str) -> None:
+        """/cmd/setup <name>: switch selection setup. No name: re-read the
+        setups file and re-apply the active one. Yaw, calibration and state
+        are untouched; the target starts again from none."""
+        if not name:
+            try:
+                setups = load_setups(self.cfg.targets)
+            except SetupError as e:
+                log.warning("ignoring /cmd/setup: %s", e)
+                return
+            if self.setup_name not in setups:
+                log.warning("setup %s is gone from the file; keeping it", self.setup_name)
+                setups[self.setup_name] = self.setups[self.setup_name]
+            self.setups = setups
+            log.info("selection setups re-read: %s", ", ".join(setups))
+            self.switch_setup(self.setup_name, force=True)
+            return
+        if name not in self.setups:
+            log.warning("ignoring /cmd/setup %r (have %s)", name, ", ".join(self.setups))
+            return
+        self.switch_setup(name)
+
+    def switch_setup(self, name: str, force: bool = False) -> None:
+        setup = self.setups[name]
+        if force or name != self.setup_name or setup != self.targets.setup:
+            self.setup_name = name
+            self.targets.set_setup(setup)
+            log.info("selection setup %s: %s", name, setup.describe())
+            self.out.send(f"{self.p}/target", "none", "none")
+            self._event("setup", name)
+        self._emit_setup()
 
     # --- transitions ----------------------------------------------------------
 
@@ -322,6 +361,11 @@ class Engine:
         log.info("event %s %s", name, " ".join(map(str, args)))
         self.out.send(f"{self.p}/event", name, *args)
 
+    def _emit_setup(self) -> None:
+        """/setup name l_lo l_hi m_lo m_hi r_lo r_hi c_l c_m c_r split max:
+        the active selection setup, yaw ranges, centres and pitch, degrees."""
+        self.out.send(f"{self.p}/setup", *self.targets.setup.osc_args())
+
     def _emit_target(self) -> None:
         t = self.targets.current
         if t is None:
@@ -357,6 +401,7 @@ class Engine:
         /calib/room  from_room room_hash left middle right lo left|middle middle|right hi
           screen centres and column bounds in degrees; room_hash = the room
           file's first 12 hex digits of SHA-1 ("" when from_room = 0).
+        /setup  the active selection setup (see _emit_setup).
         """
         self._next_calib = now + self.CALIB_EVERY_S
         f, t = self.fusion, self.cfg.targets
@@ -367,6 +412,7 @@ class Engine:
         self.out.send(f"{self.p}/calib/room", int(t.from_room), t.room_hash,
                       *(round(v, 2) for v in (t.left_yaw_deg, t.middle_yaw_deg, t.right_yaw_deg)),
                       *(round(v, 2) for v in t.bounds()))
+        self._emit_setup()
 
     def status(self, now: float) -> dict:
         """What the status page shows: state, calibration, and the numbers the
@@ -380,6 +426,7 @@ class Engine:
             "state_s": round(now - self.state_since, 1),
             "connected": self.connected,
             "phase": self.phase.value,
+            "setup": self.setup_name,
             "backend": self.cfg.imu.backend,
             "calibrated": f.calibrated,
             "calibrated_s_ago": (round(now - self._calib_t) if f.calibrated and self._calib_t is not None
@@ -406,4 +453,5 @@ class Engine:
         """Re-send the latest discrete values, so a late-starting TD catches up."""
         self.out.send(f"{self.p}/state", self.state.value)
         self.out.send(f"{self.p}/phase", self.phase.value)
+        self._emit_setup()
         self._emit_target()

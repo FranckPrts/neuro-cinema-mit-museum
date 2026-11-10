@@ -199,8 +199,15 @@ def _on_the_stand_then_worn(rig: Rig, stand_s: float = 15.0) -> None:
     assert rig.state == State.ACTIVE
 
 
+def complementary() -> Config:
+    """The complementary filter, whose own idle-bias logic some tests check."""
+    cfg = Config()
+    cfg.imu.backend = "complementary"
+    return cfg
+
+
 def test_bias_learned_on_the_stand_is_used_at_calibration():
-    rig = Rig(head=VirtualHead(seed=13, worn=False))
+    rig = Rig(complementary(), head=VirtualHead(seed=13, worn=False))
     _on_the_stand_then_worn(rig)
     assert rig.engine.fusion.bias_source == "idle"
     assert np.linalg.norm(rig.engine.fusion.bias - rig.head.bias) < 0.15
@@ -217,7 +224,7 @@ def test_bias_is_learned_only_while_idle():
 
 
 def test_stand_bias_survives_a_dropout_of_the_same_headset_only():
-    rig = Rig(head=VirtualHead(seed=15, worn=False))
+    rig = Rig(complementary(), head=VirtualHead(seed=15, worn=False))
     rig.headset = "A"
     rig.run(10.0)
     assert rig.engine.fusion.idle_bias() is not None
@@ -269,7 +276,7 @@ def test_full_flow_with_the_vqf_backend():
 
 
 def test_calibration_is_reported_for_the_viewer():
-    rig = Rig(seed=8)
+    rig = Rig(complementary(), seed=8)
     rig.run(0.5)
     imu = rig.out.last("/calib/imu")
     assert imu[:2] == ("complementary", "none") and imu[3] == -1.0  # not calibrated yet
@@ -284,3 +291,58 @@ def test_calibration_is_reported_for_the_viewer():
     assert rig.out.last("/calib/imu")[4] > 1
     room = rig.out.last("/calib/room")
     assert room[0] == 1 and len(room) == 9  # Config() defaults: from_room, but no room file loaded
+
+
+def test_setup_command_switches_columns_live():
+    rig = Rig(seed=12)
+    rig.start_session()
+    rig.head.look(yaw=17, pitch=8)
+    rig.run(1.0)
+    assert rig.out.last("/target") == ("middle", "top")  # built-in: middle up to 20
+    yaw, calibrated = rig.engine.fusion.yaw_deg, rig.engine.fusion.calibrated
+    rig.out.messages.clear()
+    rig.engine.command("setup", ("narrow-centre",), rig.t)
+    sent = [(a, args) for _, a, args in rig.out.messages]
+    assert ("/nc/target", ("none", "none")) in sent
+    assert ("/nc/setup", ("narrow-centre", -60, -12, -18, 18, 12, 60, -30, 0, 30, 0, 40)) in sent
+    assert rig.out.events("setup") == [("setup", "narrow-centre")]
+    assert rig.engine.fusion.yaw_deg == yaw and rig.engine.fusion.calibrated == calibrated
+    assert rig.state == State.ACTIVE
+    rig.run(0.5)
+    assert rig.out.last("/target") == ("right", "top")  # narrow-centre: middle ends at 18
+
+
+def test_unknown_setup_changes_nothing():
+    rig = Rig(seed=13)
+    rig.start_session()
+    before = rig.engine.targets.setup
+    rig.out.messages.clear()
+    rig.engine.command("setup", ("nope",), rig.t)
+    assert rig.engine.setup_name == "room" and rig.engine.targets.setup is before
+    assert not rig.out.messages
+
+
+def test_setup_without_name_rereads_the_file(tmp_path):
+    f = tmp_path / "s.toml"
+    f.write_text("[x]\nleft = [-60, -12]\nmiddle = [-18, 18]\nright = [12, 60]\n")
+    cfg = Config()
+    cfg.targets.setups_file = str(f)
+    cfg.targets.setup = "x"
+    rig = Rig(cfg)
+    assert rig.engine.targets.setup.ranges["middle"] == (-18, 18)
+    f.write_text("[x]\nleft = [-60, -8]\nmiddle = [-10, 10]\nright = [8, 60]\n"
+                 "[y]\nleft = [-60, -20]\nmiddle = [-20, 20]\nright = [20, 60]\n")
+    rig.engine.command("setup", (), rig.t)
+    assert rig.engine.setup_name == "x" and rig.engine.targets.setup.ranges["middle"] == (-10, 10)
+    assert rig.out.last("/setup")[:5] == ("x", -60, -8, -10, 10)
+    assert set(rig.engine.setups) == {"room", "x", "y"}
+    f.write_text("[x]\nleft = 3\n")  # broken: keep what we have
+    rig.engine.command("setup", (), rig.t)
+    assert rig.engine.targets.setup.ranges["middle"] == (-10, 10)
+
+
+def test_snapshot_and_calibration_carry_the_setup():
+    rig = Rig(seed=14)
+    rig.run(1.2)
+    assert rig.out.last("/setup")[0] == "room"
+    assert len(rig.out.last("/setup")) == 12

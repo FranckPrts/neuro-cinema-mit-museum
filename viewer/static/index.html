@@ -35,6 +35,11 @@
   #hud a { color: var(--color-paper); text-decoration: underline; text-decoration-color: var(--color-dim);
     text-underline-offset: 3px; }
   #hud a:hover { text-decoration-color: var(--color-paper); }
+  #hud select { font: inherit; color: var(--color-paper); background: var(--color-surface-hover);
+    border: 0; border-radius: 4px; padding: 1px 4px; max-width: 170px; }
+  #hud button { font: inherit; color: var(--color-dim); background: none; border: 0; padding: 0 0 0 6px; cursor: pointer; }
+  #hud button:hover { color: var(--color-paper); }
+  #setupranges { color: var(--color-dim); font-size: 12px; text-align: right; }
   #link.bad { color: var(--color-danger); } #link.ok { color: var(--color-success); }
   #agree.warn { color: var(--color-warning); } #camtarget { color: #e0b25c; }
   #headset.bad { color: var(--color-danger); } #headset.warn { color: var(--color-warning); }
@@ -79,6 +84,8 @@
   <div class="row" id="headsetrow" hidden><span class="k">headset</span><span id="headset">-</span></div>
   <div class="row"><span class="k">state</span><span id="state">-</span></div>
   <div class="row"><span class="k">phase</span><span id="phase">-</span></div>
+  <div class="row"><span class="k">setup</span><span><select id="setup" title="selection setup (sends /nc/cmd/setup to the engine)"></select><button id="setupreload" title="engine re-reads config/selection_setups.toml">reload</button></span></div>
+  <div id="setupranges"></div>
   <div class="row"><span class="k">target</span><span id="target">-</span></div>
   <div class="row"><span class="k">yaw pitch roll</span><span id="pose">-</span></div>
   <div class="row"><span class="k" id="barlabel">dwell</span><span id="barval"></span></div>
@@ -213,16 +220,13 @@ function wallRange(yawDeg) {
 }
 
 // --- target regions, painted on the walls -------------------------------
-// Same rules as TargetTracker: columns between the engine's bounds (from the
-// room: the screens' edges; else halfway between centres); rows split at
-// split_pitch_deg, limited by max_pitch_deg.
-const centres = { left: cfg.left_yaw_deg, middle: cfg.middle_yaw_deg, right: cfg.right_yaw_deg };
-const [bLo, bLM, bMR, bHi] = conf.bounds;
-const colRange = { left: [bLo, bLM], middle: [bLM, bMR], right: [bMR, bHi] };
-const rowPitch = {
-  top: [cfg.split_pitch_deg, cfg.split_pitch_deg + cfg.max_pitch_deg],
-  bottom: [cfg.split_pitch_deg - cfg.max_pitch_deg, cfg.split_pitch_deg],
-};
+// Same rules as TargetTracker: each column has the yaw range of the active
+// selection setup (config/selection_setups.toml, or the built-in one from the
+// room / the three yaws); neighbouring ranges may overlap, drawn as
+// overlapping strips. Rows split at split_pitch_deg, limited by max_pitch_deg.
+// The screens' own centres (for the room check) do not depend on the setup.
+const screenCentres = { left: cfg.left_yaw_deg, middle: cfg.middle_yaw_deg, right: cfg.right_yaw_deg };
+const COLUMNS = ["left", "middle", "right"];
 
 function wallStrip(yaw0, yaw1, pitch0, pitch1) {
   const pos = [], idx = [], N = 96;
@@ -255,47 +259,69 @@ function label(text, color) {
   return s;
 }
 
-const regions = {};  // "left/top" -> mesh
-for (const [col, [y0, y1]] of Object.entries(colRange)) {
-  for (const [row, [p0, p1]] of Object.entries(rowPitch)) {
-    const mat = new THREE.MeshBasicMaterial({ color: COL_COLOR[col], transparent: true, opacity: 0.12,
-      side: THREE.DoubleSide, depthWrite: false });
-    const mesh = new THREE.Mesh(wallStrip(y0, y1, p0, p1), mat);
-    scene.add(mesh);
-    regions[`${col}/${row}`] = mesh;
-    const mid = (y0 + y1) / 2, r = wallRange(mid) * 0.95, h = dir(mid);
-    const ly = Math.min(CEILING - 0.2, Math.max(0.2, EYE + r * Math.tan(((p0 + p1) / 2) * D2R)));
-    const l = label(`${col} ${row}`, COL_COLOR[col]);
-    l.position.set(VISITOR.x + h.x * r, ly, VISITOR.z + h.z * r);
-    scene.add(l);
-  }
-}
+// Region meshes, labels and floor rays of the active setup; rebuilt on a switch.
+const regionGroup = new THREE.Group();
+scene.add(regionGroup);
+const regions = {};     // "left/top" -> mesh
+const camRegions = {};  // the camera's target: a gold overlay on the same regions
+let activeSetup = null;
 
-// The camera's target: a gold overlay on the same regions (a whole column
-// when the camera has no rows, e.g. in head mode).
-const camRegions = {};
-for (const [key, mesh] of Object.entries(regions)) {
-  const m = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({ color: 0xe0b25c, transparent: true,
-    opacity: 0, side: THREE.DoubleSide, depthWrite: false, wireframe: true }));
-  scene.add(m);
-  camRegions[key] = m;
-}
-
-// Boundary rays on the floor: solid at each boundary, faint at the hysteresis edges.
+// Floor ray from the visitor to the wall at this yaw.
 function floorRay(yaw, color, opacity) {
   const r = wallRange(yaw), h = dir(yaw);
   const g = new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(VISITOR.x, 0.01, VISITOR.z),
     new THREE.Vector3(VISITOR.x + h.x * r, 0.01, VISITOR.z + h.z * r)]);
-  scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity })));
+  regionGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity })));
 }
-const hy = cfg.yaw_hysteresis_deg / 2;
-for (const b of [colRange.left[0], colRange.middle[0], colRange.middle[1], colRange.right[1]]) {
-  floorRay(b, PAL.paper, 0.6);
-  floorRay(b - hy, PAL.dim, 0.35);
-  floorRay(b + hy, PAL.dim, 0.35);
+
+function buildRegions(setup) {
+  for (const obj of [...regionGroup.children]) {
+    regionGroup.remove(obj);
+    obj.geometry?.dispose();
+    obj.material?.map?.dispose();
+    obj.material?.dispose();
+  }
+  for (const k of Object.keys(regions)) delete regions[k];
+  for (const k of Object.keys(camRegions)) delete camRegions[k];
+  activeSetup = setup;
+  const split = setup.split_pitch_deg, mx = setup.max_pitch_deg;
+  const rowPitch = { top: [split, split + mx], bottom: [split - mx, split] };
+  for (const col of COLUMNS) {
+    const [y0, y1] = setup.ranges[col];
+    for (const [row, [p0, p1]] of Object.entries(rowPitch)) {
+      const mesh = new THREE.Mesh(wallStrip(y0, y1, p0, p1), new THREE.MeshBasicMaterial({ color: COL_COLOR[col],
+        transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }));
+      regionGroup.add(mesh);
+      regions[`${col}/${row}`] = mesh;
+      // A whole column when the camera has no rows, e.g. in head mode.
+      const cam = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({ color: 0xe0b25c, transparent: true,
+        opacity: 0, side: THREE.DoubleSide, depthWrite: false, wireframe: true }));
+      regionGroup.add(cam);
+      camRegions[`${col}/${row}`] = cam;
+      const mid = (y0 + y1) / 2, r = wallRange(mid) * 0.95, h = dir(mid);
+      const ly = Math.min(CEILING - 0.2, Math.max(0.2, EYE + r * Math.tan(((p0 + p1) / 2) * D2R)));
+      const l = label(`${col} ${row}`, COL_COLOR[col]);
+      l.position.set(VISITOR.x + h.x * r, ly, VISITOR.z + h.z * r);
+      regionGroup.add(l);
+    }
+    // Each range's edges in its column's colour, its centre in grey.
+    floorRay(y0, COL_COLOR[col], 0.7);
+    floorRay(y1, COL_COLOR[col], 0.7);
+    floorRay(setup.centres[col], PAL.dim, 0.8);
+  }
+  // Outer ends: faint rays where a target is entered / kept (yaw_hysteresis_deg / 2).
+  const hy = cfg.yaw_hysteresis_deg / 2;
+  for (const [b, s] of [[setup.ranges.left[0], 1], [setup.ranges.right[1], -1]]) {
+    floorRay(b + s * hy, PAL.dim, 0.35);
+    floorRay(b - s * hy, PAL.dim, 0.35);
+  }
+  $("setupranges").textContent = COLUMNS.map((c) => {
+    const [a, b] = setup.ranges[c];
+    return `${c[0]} ${a >= 0 ? "+" : ""}${a.toFixed(0)}..${b >= 0 ? "+" : ""}${b.toFixed(0)}`;
+  }).join("  ");
+  showSetupChoice(setup.name);
 }
-for (const c of Object.values(centres)) floorRay(c, PAL.dim, 0.8);
 
 // --- the visitor's head ---------------------------------------------------
 const head = new THREE.Group();
@@ -435,6 +461,7 @@ function onMessage(a, v) {
       break;
     case "calib/imu": onCalibImu(v); break;
     case "calib/room": onCalibRoom(v); break;
+    case "setup": onSetup(v); break;
     case "cam/calib": onCamCalib(v.map(Number)); break;
     case "status/error":
       if (v[0] !== "ok") logLine(`ERROR ${v.join(" ")}`, "err"); break;
@@ -451,6 +478,46 @@ function onMessage(a, v) {
     }
   }
 }
+
+// --- selection setup (engine /setup, dropdown -> /cmd/setup) --------------
+// The page draws what the engine says it uses: the dropdown only asks.
+function setupFromOsc(v) {
+  const n = v.slice(1).map(Number);
+  return { name: String(v[0]), ranges: { left: [n[0], n[1]], middle: [n[2], n[3]], right: [n[4], n[5]] },
+    centres: { left: n[6], middle: n[7], right: n[8] }, split_pitch_deg: n[9], max_pitch_deg: n[10] };
+}
+// OSC values are rounded to 0.01 degree.
+const setupNumbers = (s) => [...COLUMNS.flatMap((c) => s.ranges[c]), ...COLUMNS.map((c) => s.centres[c]),
+  s.split_pitch_deg, s.max_pitch_deg];
+const sameSetup = (a, b) => a.name === b.name
+  && setupNumbers(a).every((x, i) => Math.abs(x - setupNumbers(b)[i]) < 0.02);
+function onSetup(v) {
+  if (v.length < 12) return;
+  const setup = setupFromOsc(v);
+  if (activeSetup && sameSetup(setup, activeSetup)) return;
+  buildRegions(setup);  // the engine's `setup <name>` event logs the switch
+}
+function showSetupChoice(name) {
+  const sel = $("setup");
+  if (![...sel.options].some((o) => o.value === name)) sel.add(new Option(name, name));
+  sel.value = name;
+}
+async function askSetup(name) {
+  try {
+    const r = await fetch("/api/setup", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }) });
+    if (!r.ok) throw new Error(r.statusText);
+  } catch (e) { logLine(`cannot reach the engine: ${e.message}`, "err"); }
+}
+for (const name of Object.keys(conf.setups)) $("setup").add(new Option(name, name));
+$("setup").addEventListener("change", (e) => {
+  const name = e.target.value;
+  if (activeSetup) showSetupChoice(activeSetup.name);  // until the engine confirms
+  e.target.blur();
+  askSetup(name);
+});
+$("setupreload").addEventListener("click", (e) => { e.target.blur(); askSetup(""); });
+buildRegions(conf.setups[conf.active]);
 
 // --- calibration (engine /calib/*, camera /cam/calib) ---------------------
 const banner = { room: "", cam: "" };
@@ -514,7 +581,7 @@ const MOVE_S = 2.0, HOLD_S = 2.5;
 const SCREEN_INSET = conf.room.screens.inset_m;
 function trueDirection(key) {
   const [col, row] = key.split("/");
-  const yaw = centres[col];
+  const yaw = screenCentres[col];
   const dist = wallRange(yaw);
   const h0 = SCREEN_INSET, h1 = CEILING - SCREEN_INSET;   // screen bottom and top
   const mid = (h0 + h1) / 2;

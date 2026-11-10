@@ -47,7 +47,7 @@ host = "127.0.0.1"            # "0.0.0.0" to reach it from a tablet on the same 
 port = 8081                   # 8080 is the 3D viewer (viewer/nc_viewer.py)
 
 [imu]
-backend = "vqf"     # orientation filter: "complementary" or "vqf" (pip install -e '.[vqf]')
+backend = "vqf"               # orientation filter: "vqf" or "complementary"
 forward_axis = "x"           # sensor axis pointing out of the forehead: x -x y -y z -z (verify on hardware)
 invert_yaw = false            # flip if turning right shows negative yaw
 invert_pitch = false          # flip if looking up shows negative pitch
@@ -91,6 +91,12 @@ outer_margin_deg = 30.0       # from_room = false only: beyond the outer centres
 split_pitch_deg = 0.0         # pitch of the top/bottom divider, relative to the calibration gaze
 pitch_hysteresis_deg = 4.0
 max_pitch_deg = 40.0
+# Selection setup: the yaw range of each column, independent of the room
+# (ranges may overlap or leave gaps). Named setups live in setups_file; empty =
+# the built-in one ("room" here: the screens' edges, widened by the dead band).
+# Switch while running: /nc/cmd/setup <name>, the viewer's dropdown, `s` in the simulator.
+setup = "narrow-centre"       # default ""; `nc-engine --setup <name>` overrides it for one run
+setups_file = "config/selection_setups.toml"  # relative: current folder, then the repo root
 
 [gestures.nod]
 enter_dps = 30.0
