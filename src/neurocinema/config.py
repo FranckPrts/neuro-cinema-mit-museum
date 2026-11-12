@@ -100,6 +100,29 @@ class HeadsetsConfig:
 
 
 @dataclass
+class HeartRateConfig:
+    """Heart rate from the Muse 2 PPG (source.kind = "muse_direct" only).
+
+    `enabled` puts the headset in preset p50, which switches the PPG on and
+    adds a 64 Hz optical stream next to the IMU on the Bluetooth link.
+    """
+
+    enabled: bool = True
+    channel: str = "infrared"  # "ambient", "infrared" or "red"
+    window_s: float = 8.0  # each estimate looks at this much signal...
+    update_every_s: float = 1.0  # ...and is redone this often
+    min_bpm: float = 40.0
+    max_bpm: float = 180.0
+    # Pulse autocorrelation at the beat period (0..1) needed to trust an estimate.
+    # Noise alone rarely reaches 0.65 (synthetic tests); tune on real recordings.
+    min_quality: float = 0.7
+    # Head moving (gyro range above this): pause estimates for one window.
+    motion_dps: float = 15.0
+    # Keep reporting the last good estimate this long, then report unknown.
+    hold_s: float = 15.0
+
+
+@dataclass
 class CameraConfig:
     # The camera bench (bench/camera, --osc host:port) sends its /nc/cam/*
     # here; the engine re-publishes them on osc.destinations, so TouchDesigner
@@ -305,6 +328,7 @@ class Config:
     muse: MuseConfig = field(default_factory=MuseConfig)
     headsets: HeadsetsConfig = field(default_factory=HeadsetsConfig)
     status_page: StatusPageConfig = field(default_factory=StatusPageConfig)
+    heart_rate: HeartRateConfig = field(default_factory=HeartRateConfig)
     imu: ImuConfig = field(default_factory=ImuConfig)
     calibration: CalibrationConfig = field(default_factory=CalibrationConfig)
     targets: TargetsConfig = field(default_factory=TargetsConfig)
@@ -321,6 +345,14 @@ class Config:
         self.headsets.entries()
         if self.headsets.connect_attempts < 1:
             raise ConfigError("headsets.connect_attempts must be at least 1")
+        hr = self.heart_rate
+        if hr.channel not in ("ambient", "infrared", "red"):
+            raise ConfigError("heart_rate.channel must be 'ambient', 'infrared' or 'red'")
+        if not 0 < hr.min_bpm < hr.max_bpm:
+            raise ConfigError("heart_rate: expected 0 < min_bpm < max_bpm")
+        if hr.window_s < 60.0 / hr.min_bpm * 2 or hr.update_every_s <= 0:
+            raise ConfigError("heart_rate.window_s must cover at least two beats at min_bpm; "
+                              "update_every_s must be positive")
         if self.imu.forward_axis not in AXIS_NAMES:
             raise ConfigError(f"imu.forward_axis must be one of {AXIS_NAMES}")
         if self.imu.backend not in ("complementary", "vqf"):

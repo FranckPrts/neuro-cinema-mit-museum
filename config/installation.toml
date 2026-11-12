@@ -41,6 +41,18 @@ swap_soon_percent = 20.0      # status "swap soon" below this battery level...
 swap_soon_minutes = 30.0      # ...or this estimated time left
 auto_adopt_after_s = 0.0      # fallback: use the only registered headset in range after this long; 0 = off
 
+[heart_rate]
+# Only used with source.kind = "muse_direct". Muse 2 PPG (forehead pulse), sent as /nc/heart.
+enabled = true                # preset p50: PPG on, 64 Hz optical stream next to the IMU
+channel = "infrared"          # "ambient", "infrared" or "red"
+window_s = 8.0                # each estimate looks at this much signal...
+update_every_s = 1.0          # ...and is redone this often
+min_bpm = 40.0
+max_bpm = 180.0
+min_quality = 0.7             # pulse autocorrelation at the beat period (0..1) needed to trust an estimate
+motion_dps = 15.0             # head moving above this: pause estimates for one window
+hold_s = 15.0                 # keep the last good estimate this long, then report unknown
+
 [status_page]
 enabled = true                # staff page: engine state, calibrate / put down / re-centre; headsets with muse_direct
 host = "127.0.0.1"            # "0.0.0.0" to reach it from a tablet on the same network

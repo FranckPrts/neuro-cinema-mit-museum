@@ -285,6 +285,7 @@ Engine → TouchDesigner (default `127.0.0.1:7000`):
 | `/nc/status/stream` | state (`stopped` `starting` `streaming` `backoff`), consecutive_failures (int) | 2 Hz, headset mode |
 | `/nc/status/error` | code (`stream_unrecoverable` / `ok`), message | after repeated stream failures; `ok` once recovered |
 | `/nc/headset` | label (string, `""` = none), battery_percent (float, -1 = unknown), minutes_left (float, -1 = unknown), phase (`no_headset` `connecting` `confirming` `active` `reconnecting`), alert (`ok` `swap_soon` `offline`) | 2 Hz, `muse_direct` only |
+| `/nc/heart` | bpm (float, -1 = unknown), quality (0..1, of the last estimate), age_s (float, seconds since bpm was measured, -1 = unknown), moving (int, 1 = head moving, estimates paused) | 2 Hz, `muse_direct` with `heart_rate.enabled` |
 | `/nc/state` | `disconnected` `idle` `calibrating` `active` `selected` `resetting` | on change, and every second |
 | `/nc/phase` | `choosing` / `watching` | on change, and every second |
 | `/nc/target` | column (`left` `middle` `right` `none`), row (`top` `bottom` `none`) | on change, and every second |

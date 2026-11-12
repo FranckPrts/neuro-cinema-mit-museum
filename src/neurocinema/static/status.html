@@ -45,6 +45,13 @@
             background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok);
             font-weight: 700; font-size: 14px; }
   .hs .on::before { content: "\25CF  "; }
+  /* Pulse sensor on the in-use headset: on a head or not. Never shows the heart rate. */
+  .hs .pulse { display: inline-block; margin: 0 0 10px; padding: 3px 10px; border-radius: 999px;
+               font-weight: 600; font-size: 14px; border: 1px solid var(--line); color: var(--quiet); }
+  .hs .pulse::before { content: "\25CF  "; }
+  .hs .pulse.worn { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+  .hs .pulse.not_worn { background: var(--bg); color: var(--ink); }
+  .hs .pulse.waiting::before { content: "\25CB  "; }
   /* Battery over the last 2 hours: full width = 2 h, height = 0-100 %. Right edge is now. */
   .hs .spark { margin: -4px 0 10px; }
   .hs .spark svg { display: block; width: 100%; height: 44px; overflow: visible; }
@@ -109,7 +116,7 @@
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
-let soundOn = false, audio = null, lastAlert = "ok", lastBeep = 0, current = null;
+let soundOn = false, audio = null, lastAlert = "ok", lastBeep = 0, current = null, pulse = null;
 
 function beep() {
   if (!soundOn || !audio) return;
@@ -162,6 +169,11 @@ const BIAS_FROM = {
   idle: "learned on the stand", worn: "measured on the head (2 s)", vqf: "VQF, learned on the stand", none: "none yet",
 };
 const TRACKING = ["active", "selected", "resetting"];
+const PULSE = {
+  worn: ["On a head", "The pulse sensor finds a pulse."],
+  not_worn: ["Not on a head", "No pulse: on its stand, or not touching the forehead."],
+  waiting: ["Checking pulse…", "The pulse sensor needs about 10 s of signal, with the head fairly still."],
+};
 let managed = true;
 
 function fact(dl, name, value, cls) {
@@ -299,6 +311,12 @@ function render(s) {
       if (meta.length) metaEl.append(document.createElement("br"));
       metaEl.append(on);
     }
+    if (h.in_use && pulse && PULSE[pulse]) {
+      const p = document.createElement("div");
+      p.className = "pulse " + pulse;
+      [p.textContent, p.title] = PULSE[pulse];
+      card.appendChild(p);
+    }
     if (h.in_use && h.battery_trace.length >= 2) card.appendChild(sparkline(h.battery_trace, s.swap_soon_percent));
     const b = document.createElement("button");
     b.textContent = h.chosen ? (h.in_use ? "In use" : "Waiting…") : "Use this headset";
@@ -332,11 +350,10 @@ async function refresh() {
   try {
     const [hs, eng] = await Promise.all([fetch("/api/status", { cache: "no-store" }),
                                          fetch("/api/engine", { cache: "no-store" })]);
+    const e = eng.ok ? await eng.json() : null;
+    pulse = e ? e.pulse : null;  // drawn on the in-use headset card
     render(await hs.json());
-    if (eng.ok) {
-      const e = await eng.json();
-      if (e.state) renderEngine(e);
-    }
+    if (e && e.state) renderEngine(e);
     $("conn").style.display = "none";
   } catch (e) {
     $("conn").style.display = "block";

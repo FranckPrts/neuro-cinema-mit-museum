@@ -175,6 +175,16 @@ class HeadsetManager:
     def headset_id(self) -> str | None:
         return self.current
 
+    def poll_ppg(self) -> list:
+        """PPG readings (`ble.PpgReading`) from the headset in use, oldest first.
+
+        Its own stream, like the IMU: read after `poll()` each loop.
+        """
+        readings = self.worker.ppg_readings()
+        if self.phase != Phase.ACTIVE:
+            return []
+        return [r for r in readings if r.label == self.current]
+
     def reset(self) -> None:
         """`/nc/cmd/restart_stream`: reconnect the current headset."""
         self.submit("reconnect")

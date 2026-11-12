@@ -65,7 +65,9 @@ def make_headset_manager(cfg: Config, simulated: bool):
             log.error("headset support is not installed (%s); run: pip install -e '.[muse]'", e)
             return None
     log.info("headsets: %s", ", ".join(cfg.headsets.registry))
-    return HeadsetManager(cfg.headsets, BleWorker(driver))
+    if cfg.heart_rate.enabled:
+        log.info("headset PPG on (preset p50); heart rate on %s/heart", cfg.osc.prefix)
+    return HeadsetManager(cfg.headsets, BleWorker(driver, ppg=cfg.heart_rate.enabled))
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:

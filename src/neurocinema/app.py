@@ -11,6 +11,7 @@ from collections.abc import Callable
 from .camera import CameraRelay
 from .config import Config
 from .engine import Engine, Output
+from .heartrate import HeartRate, HeartReading
 from .osc import OscCommandServer
 from .setups import SelectionSetup
 from .sources.base import ImuSource
@@ -81,6 +82,12 @@ class App:
         self._started = time.monotonic()
         self._next_status = 0.0
         self._next_heartbeat = 0.0
+        # Heart rate from the headset PPG (muse_direct only: the source has poll_ppg).
+        self.heart: HeartRate | None = None
+        if cfg.heart_rate.enabled and hasattr(source, "poll_ppg"):
+            self.heart = HeartRate(cfg.heart_rate)
+        self._heart_headset: str | None = None
+        self._heart_reading: HeartReading | None = None
 
     def run(self) -> None:
         log.info("engine running (source=%s)", self.cfg.source.kind)
@@ -106,6 +113,8 @@ class App:
         connected = source.connected()
         if connected != self.engine.connected:
             self.engine.on_connection(connected, now, headset=source.headset_id() if connected else None)
+        if self.heart:
+            self._step_heart(now, connected)
         if self.supervisor:
             self.supervisor.tick(connected)
         if self.commands:
@@ -122,7 +131,31 @@ class App:
         self.engine.tick(now)
         self._emit_status(now)
         if page_commands:
-            self.page.publish(self.engine.status(now))  # show the result at once
+            self.page.publish(self._page_status(now))  # show the result at once
+
+    def _page_status(self, now: float) -> dict:
+        """Engine status for the staff page, plus the PPG on-a-head check.
+
+        `pulse`: "worn", "not_worn", "waiting" (not enough signal yet), or None
+        when there is no PPG. Only this word goes to the page, never the heart rate.
+        """
+        status = self.engine.status(now)
+        pulse = None
+        if self.heart is not None:
+            worn = self._heart_reading.worn if self._heart_reading is not None else None
+            pulse = "waiting" if worn is None else ("worn" if worn else "not_worn")
+        status["pulse"] = pulse
+        return status
+
+    def _step_heart(self, now: float, connected: bool) -> None:
+        headset = self.source.headset_id() if connected else None
+        if headset != self._heart_headset:
+            self._heart_headset = headset
+            self.heart.reset()  # never mix two heads (or a gap) in one window
+        for r in self.source.poll_ppg():
+            self.heart.add(r.t, r.ambient, r.infrared, r.red)
+        self.heart.motion(now, self.engine.fusion.stillness.gyro_range())
+        self._heart_reading = self.heart.update(now)
 
     def handle_command(self, name: str, args: tuple, now: float) -> None:
         log.info("command %s %s", name, " ".join(map(str, args)))
@@ -143,7 +176,7 @@ class App:
             self.out.send(f"{self.p}/heartbeat", round(mono - self._started, 1))
         if mono >= self._next_status:
             self._next_status = mono + 1.0 / self.cfg.osc.status_rate_hz
-            self.page.publish(self.engine.status(now))
+            self.page.publish(self._page_status(now))
             last = self.source.last_receive()
             age_ms = -1 if last is None else int((now - last) * 1000)
             motion = self.engine.fusion.stillness.gyro_range()
@@ -159,6 +192,15 @@ class App:
                     f"{self.p}/status/stream",
                     self.supervisor.state.value,
                     self.supervisor.failures,
+                )
+            if self._heart_reading is not None:
+                h = self._heart_reading
+                self.out.send(
+                    f"{self.p}/heart",
+                    -1.0 if h.bpm is None else round(h.bpm, 1),
+                    round(h.quality, 2),
+                    -1.0 if h.age_s is None else round(h.age_s, 1),
+                    int(h.moving),
                 )
             snapshot = getattr(self.source, "snapshot", None)
             if snapshot is not None:  # headset manager (muse_direct)

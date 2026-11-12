@@ -5,7 +5,9 @@ it is told (scan, connect, disconnect) and reports back through queues; every
 decision is made by `headsets.HeadsetManager` on the main loop.
 
 The real link goes through muselsl's `Muse` class (bleak underneath), without
-`muselsl stream` and without LSL. `FakeDriver` stands in for it in tests and in
+`muselsl stream` and without LSL. With PPG on, the headset is put in preset
+p50 (the PPG LED lights up) and the three optical channels arrive as their
+own stream, next to the IMU and battery. `FakeDriver` stands in for it in tests and in
 `nc-engine --sim-headsets`.
 """
 
@@ -13,7 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import queue
+import random
 import threading
 import time
 from collections import deque
@@ -24,10 +28,14 @@ from typing import Protocol
 log = logging.getLogger(__name__)
 
 IMU_RATE_HZ = 52.0
+PPG_RATE_HZ = 64.0
+# Muse 2 preset that switches the PPG sensor on (muselsl's default p21 leaves it off).
+PPG_PRESET = "p50"
 
 # Callbacks a driver calls from inside connect()/pump().
 OnImu = Callable[[str, float, float, float, float], None]  # kind, t, x, y, z
 OnBattery = Callable[[float, float], None]  # percent, t
+OnPpg = Callable[[float, float, float, float], None]  # t, ambient, infrared, red
 
 
 class ConnectError(RuntimeError):
@@ -46,8 +54,9 @@ class BleDriver(Protocol):
     def scan(self, timeout_s: float) -> list[Seen]:
         """Muses currently advertising (i.e. switched on and not connected)."""
 
-    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery) -> None:
-        """Connect and start streaming ACC + GYRO. Raises ConnectError."""
+    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery,
+                on_ppg: OnPpg | None = None) -> None:
+        """Connect and start streaming ACC + GYRO (+ PPG if on_ppg). Raises ConnectError."""
 
     def pump(self, seconds: float) -> None:
         """Let the Bluetooth stack deliver data for this long (callbacks run here)."""
@@ -68,6 +77,17 @@ class ImuReading:
     z: float
 
 
+@dataclass(frozen=True)
+class PpgReading:
+    """One PPG sample: raw light levels of the three optical channels."""
+
+    label: str
+    t: float
+    ambient: float
+    infrared: float
+    red: float
+
+
 class BleWorker:
     """Runs a driver on its own thread. Thread-safe API for the main loop.
 
@@ -79,8 +99,10 @@ class BleWorker:
       ("battery", label, percent, t)
     """
 
-    def __init__(self, driver: BleDriver, start_thread: bool = True):
+    def __init__(self, driver: BleDriver, start_thread: bool = True, ppg: bool = False):
         self.driver = driver
+        self.ppg = ppg
+        self._ppg: deque[PpgReading] = deque(maxlen=int(PPG_RATE_HZ * 30))
         self._commands: queue.Queue[tuple] = queue.Queue()
         self._events: queue.Queue[tuple] = queue.Queue()
         self._readings: deque[ImuReading] = deque(maxlen=5000)
@@ -122,6 +144,12 @@ class BleWorker:
         out = []
         while self._readings:
             out.append(self._readings.popleft())
+        return out
+
+    def ppg_readings(self) -> list[PpgReading]:
+        out = []
+        while self._ppg:
+            out.append(self._ppg.popleft())
         return out
 
     def close(self) -> None:
@@ -179,7 +207,8 @@ class BleWorker:
                     return
                 address = found[0].address
             try:
-                self.driver.connect(address, name, self._imu_cb(label), self._battery_cb(label))
+                self.driver.connect(address, name, self._imu_cb(label), self._battery_cb(label),
+                                    self._ppg_cb(label) if self.ppg else None)
             except Exception as e:  # noqa: BLE001
                 log.warning("could not connect to headset %s (%s): %s", label, name, e)
                 self._events.put(("connect_failed", label, str(e) or type(e).__name__))
@@ -207,6 +236,11 @@ class BleWorker:
     def _battery_cb(self, label: str) -> OnBattery:
         def cb(percent: float, t: float) -> None:
             self._events.put(("battery", label, percent, t))
+        return cb
+
+    def _ppg_cb(self, label: str) -> OnPpg:
+        def cb(t: float, ambient: float, infrared: float, red: float) -> None:
+            self._ppg.append(PpgReading(label, t, ambient, infrared, red))
         return cb
 
 
@@ -240,7 +274,8 @@ class MuselslDriver:
         devices = self._backends.BleakBackend().scan(timeout=timeout_s)
         return [Seen(d["name"], d["address"]) for d in devices if d["name"] and "Muse" in d["name"]]
 
-    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery) -> None:
+    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery,
+                on_ppg: OnPpg | None = None) -> None:
         def imu(kind: str):
             def cb(samples, timestamps):
                 # muselsl stamps all three samples of a packet with the arrival
@@ -251,6 +286,12 @@ class MuselslDriver:
                     x, y, z = (float(v) for v in samples[:, i])
                     on_imu(kind, t_last - (n - 1 - i) / IMU_RATE_HZ, x, y, z)
             return cb
+
+        def ppg(samples, timestamps):
+            # samples: rows ambient, infrared, red; one column per sample.
+            for i in range(samples.shape[1]):
+                on_ppg(float(timestamps[i]), float(samples[0, i]), float(samples[1, i]),
+                       float(samples[2, i]))
 
         def telemetry(t, battery, _fuel_gauge, _adc_volt, _temperature):
             self._got_battery = True
@@ -271,6 +312,8 @@ class MuselslDriver:
             callback_gyro=imu("gyro"),
             callback_telemetry=telemetry,
             callback_control=control,
+            callback_ppg=ppg if on_ppg is not None else None,
+            preset=PPG_PRESET if on_ppg is not None else None,
             backend="bleak",
             time_func=self.clock,
             name=name,
@@ -313,7 +356,9 @@ class FakeDriver:
 
     `headsets` maps BLE name -> starting battery percent. A connected headset
     streams a virtual head at 52 Hz and drains its battery `drain_per_min`
-    percent per minute. `lifted_after_s` simulates staff picking it up.
+    percent per minute. `lifted_after_s` simulates staff picking it up. With
+    PPG on, it also streams a 64 Hz pulse at a steady heart rate per headset
+    (`heart_bpm`), with some noise.
     """
 
     def __init__(
@@ -343,6 +388,10 @@ class FakeDriver:
         self._next_battery = 0.0
         self._on_imu: OnImu | None = None
         self._on_battery: OnBattery | None = None
+        self._on_ppg: OnPpg | None = None
+        self._t_next_ppg = 0.0
+        self.heart_bpm = {n: 62.0 + (sum(map(ord, n)) % 25) for n in headsets}
+        self._noise = random.Random(7)
         self.link_up = True  # set False to simulate the link dying
 
     def address(self, name: str) -> str:
@@ -353,17 +402,19 @@ class FakeDriver:
             time.sleep(min(timeout_s, 0.5))
         return [Seen(n, self.address(n)) for n in sorted(self.switched_on) if n != self._name]
 
-    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery) -> None:
+    def connect(self, address: str, name: str, on_imu: OnImu, on_battery: OnBattery,
+                on_ppg: OnPpg | None = None) -> None:
         if name not in self.switched_on or name in self.fail_connect or address != self.address(name):
             raise ConnectError(f"{name} did not answer")
         if self.battery.get(name, 0.0) <= 0.0:
             raise ConnectError(f"{name} battery is empty")
         self._name = name
         self._head = self._head_cls(seed=hash(name) & 0xFFFF, worn=False)
-        self._on_imu, self._on_battery = on_imu, on_battery
+        self._on_imu, self._on_battery, self._on_ppg = on_imu, on_battery, on_ppg
         now = self.clock()
         self._connected_at = now
         self._t_next = now
+        self._t_next_ppg = now
         self._next_battery = now
         self._last_drain = now
         self.link_up = True
@@ -384,6 +435,18 @@ class FakeDriver:
             self._on_imu("acc", self._t_next, *map(float, acc))
             self._on_imu("gyro", self._t_next, *map(float, gyro))
             self._t_next += 1.0 / IMU_RATE_HZ
+        if self._on_ppg is not None:
+            beat_hz = self.heart_bpm.get(self._name, 70.0) / 60.0
+            while self._t_next_ppg <= now:
+                t = self._t_next_ppg
+                phase = (t * beat_hz) % 1.0
+                # Blood volume pulse: sharp rise, slow fall; less light comes back at the peak.
+                pulse = math.exp(-((phase - 0.15) ** 2) / 0.004) + 0.4 * math.exp(-((phase - 0.45) ** 2) / 0.01)
+                drift = 300.0 * math.sin(2 * math.pi * 0.1 * t)
+                ir = 120_000.0 + drift - 2_000.0 * pulse + self._noise.gauss(0.0, 150.0)
+                red = 60_000.0 + drift / 2 - 800.0 * pulse + self._noise.gauss(0.0, 100.0)
+                self._on_ppg(t, 1_000.0 + self._noise.gauss(0.0, 20.0), ir, red)
+                self._t_next_ppg += 1.0 / PPG_RATE_HZ
         if now >= self._next_battery:
             drained = self.drain_per_min * (now - self._last_drain) / 60.0
             self._last_drain = now
