@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stop everything this repo starts (engine, camera bench, viewer, monitor,
-# muselsl) so the OSC ports are free again, then show who still holds them.
+# OSC recorder/player, muselsl; the recorder saves its file on the way out) so the OSC ports are free again, then show who still holds them.
 # Leaves TouchDesigner and anything else alone. Used by the VS Code "Try: ..." tasks.
 set -u
 cd "$(dirname "$0")/.."
@@ -9,6 +9,8 @@ PATTERNS=(
   "nc-engine"
   "python -m neurocinema"
   "nc-monitor"
+  "nc-osc-record"
+  "nc-osc-play"
   "viewer/nc_viewer.py"
   "bench/camera/camera_bench.py"
   "muselsl stream"
@@ -42,12 +44,12 @@ else
   echo "nothing of ours was running"
 fi
 
-# 7000 TouchDesigner, 7001 engine commands, 7002 monitor, 7003 viewer, 7004 camera -> engine,
+# 7000 TouchDesigner, 7001 engine commands, 7002 monitor, 7003 viewer, 7004 camera -> engine, 7005 OSC recorder,
 # 8080 viewer page, 8081 status page.
-busy=$(lsof +c 0 -nP -iUDP:7000-7004 -iTCP:8080-8081 -sTCP:LISTEN 2>/dev/null | tail -n +2)
+busy=$(lsof +c 0 -nP -iUDP:7000-7005 -iTCP:8080-8081 -sTCP:LISTEN 2>/dev/null | tail -n +2)
 if [ -n "$busy" ]; then
   echo "ports still in use (e.g. TouchDesigner on 7000):"
   echo "$busy" | awk '{printf "  %-16s pid %-7s %s\n", $1, $2, $9}'
 else
-  echo "ports 7000-7004, 8080, 8081 are free"
+  echo "ports 7000-7005, 8080, 8081 are free"
 fi

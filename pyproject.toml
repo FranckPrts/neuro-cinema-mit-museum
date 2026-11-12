@@ -32,6 +32,8 @@ vqf = []
 [project.scripts]
 nc-engine = "neurocinema.cli:main"
 nc-monitor = "neurocinema.monitor:main"
+nc-osc-record = "neurocinema.oscrec:record_main"
+nc-osc-play = "neurocinema.oscrec:play_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

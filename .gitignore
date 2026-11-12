@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 logs/
 run/
+recordings/
 config/local.toml
 .DS_Store
 docs/*

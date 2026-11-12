@@ -346,3 +346,25 @@ def test_snapshot_and_calibration_carry_the_setup():
     rig.run(1.2)
     assert rig.out.last("/setup")[0] == "room"
     assert len(rig.out.last("/setup")) == 12
+
+
+def test_target_sent_once_per_tick_not_per_sample():
+    """A burst of samples (the Muse sends 3 at a time) may change column, then
+    row, or cross a boundary and back: TouchDesigner gets only where it ended."""
+    rig = Rig()
+    rig.start_session()
+    rig.head.look(yaw=0, pitch=12)
+    rig.run(1.0)
+    e = rig.engine
+    assert rig.out.last("/target") == ("middle", "top")
+
+    def burst(*poses):
+        n = len(rig.out.messages)
+        for yaw, pitch in poses:  # what process() does for each sample of the burst
+            if e.targets.update(rig.t, yaw, pitch):
+                e._target_pending = True
+        e.tick(rig.t)
+        return [args for _, a, args in rig.out.messages[n:] if a.endswith("/target")]
+
+    assert burst((-40, 12), (-40, -12)) == [("left", "bottom")]  # not left top first
+    assert burst((0, -12), (-40, -12)) == []                    # there and back: nothing

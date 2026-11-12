@@ -69,6 +69,21 @@
       "problemMatcher": []
     },
     {
+      "label": "OSC: record (:7005, add it to osc.destinations)",
+      "type": "shell",
+      "command": "nc-osc-record",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "OSC: play latest recording -> TouchDesigner :7000 (loop)",
+      "type": "shell",
+      // Stop nc-engine first: both would send to 7000.
+      "command": "nc-osc-play --latest --loop",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
       "label": "Muse: stream (EEG + ACC + GYRO)",
       "type": "shell",
       "command": "muselsl stream --acc --gyro --lsltime",

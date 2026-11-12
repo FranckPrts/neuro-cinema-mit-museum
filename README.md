@@ -24,7 +24,7 @@ contract for TouchDesigner is the OSC reference below (and
 `docs/osc-contract.csv` locally).
 
 EEG is not used yet (Layer C will add live EEG on a separate `/nc/eeg/...`
-namespace; nothing is ever recorded).
+namespace; EEG is never recorded).
 
 ## Setup
 
@@ -113,6 +113,41 @@ In the viewer: white = IMU, gold = camera; the calibration card (top right)
 shows what each one was set up with; `r` runs the room check (each backend's
 error at each screen). Everything reads `config/room.toml`, so measure the
 room there first. See `viewer/README.md`.
+
+## Recording and replaying sessions (for TouchDesigner work)
+
+`nc-osc-record` saves what the engine sends on OSC; `nc-osc-play` sends it
+again later with the original timing, so TouchDesigner can be built and tested
+without a headset or a visitor. Only the engine's OSC output is recorded (pose,
+targets, gestures, state, events, `/nc/cam/...`): no sensor samples, no EEG.
+
+1. Have the engine also send to 7005, in `config/local.toml` (then restart it):
+
+   ```toml
+   [osc]
+   destinations = ["127.0.0.1:7000", "127.0.0.1:7002", "127.0.0.1:7003", "127.0.0.1:7005"]
+   ```
+
+2. Record, Ctrl-C to stop (files go to `recordings/osc/`, which git ignores):
+
+   ```bash
+   nc-osc-record --name nods-left-top
+   ```
+
+3. Play back to TouchDesigner (stop `nc-engine` first, or both send to 7000):
+
+   ```bash
+   nc-osc-play --latest                  # newest recording -> 127.0.0.1:7000
+   nc-osc-play FILE --loop --speed 0.5   # loop, half speed
+   nc-osc-play FILE --start 30 --end 90  # one stretch, in seconds
+   nc-osc-play FILE --exclude /nc/cam    # headset only (or --filter /nc/cam)
+   nc-osc-play FILE --info               # addresses and timed events, to pick --start/--end
+   nc-osc-play FILE --to 192.168.1.20:7000   # TouchDesigner on another machine
+   ```
+
+Files are JSON Lines, one message per line with its time and OSC type tags, so
+playback sends exactly the same types; they are written as messages arrive.
+`nc-osc-play` also reads the NeuroTheater `osc_recorder.py` JSON files.
 
 ## First session with the real headset
 
@@ -339,6 +374,7 @@ ever written to disk.
 | `src/neurocinema/ble.py`, `headsets.py` | in-process headset link, registry, swaps, battery (`muse_direct`) |
 | `src/neurocinema/statuspage.py`, `static/status.html` | local status page for staff |
 | `src/neurocinema/sim/` | virtual head and keyboard control |
+| `oscrec.py` | `nc-osc-record` / `nc-osc-play`: record the OSC output, replay it to TouchDesigner |
 | `bench/imu/` | IMU-only recording and replay, to compare orientation backends on real data |
 | `config/installation.toml` | every setting, documented (mirrors the code defaults) |
 

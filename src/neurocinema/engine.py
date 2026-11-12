@@ -51,6 +51,8 @@ class Phase(StrEnum):
 _TRACKING = (State.ACTIVE, State.SELECTED, State.RESETTING)
 # States that belong to a visitor's session (resumed after a short dropout).
 _SESSION = (State.CALIBRATING, *_TRACKING)
+# Entering these drops the target (/target none none).
+_CLEARS_TARGET = (State.CALIBRATING, State.IDLE, State.DISCONNECTED, State.RESETTING)
 
 
 class Output(Protocol):
@@ -81,6 +83,11 @@ class Engine:
         self._idle_still_since: float | None = None
         self._idle_tilt_since: float | None = None
         self._reset_still_since: float | None = None
+        # /target goes out at most once per tick: a burst of samples (the Muse
+        # sends 3 at a time) can cross a boundary and back, or change column and
+        # then row, and TouchDesigner must not see the in-between targets.
+        self._sent_target: Target | None = None
+        self._target_pending = False
         self._next_pose = 0.0
         self._next_snapshot = 0.0
         # For /calib/imu: when calibration happened, yaw corrected since, clipped samples then.
@@ -125,10 +132,11 @@ class Engine:
         # not flip the highlight. The column keeps tracking: nods barely yaw.
         if self.state == State.ACTIVE:
             if self.targets.update(t, f.yaw_deg, f.pitch_deg, hold_row=self.nod.busy):
-                self._emit_target()
+                self._target_pending = True
 
     def tick(self, now: float) -> None:
         ic = self.cfg.interaction
+        self._flush_target()
 
         if self.state == State.SELECTED and now - self.state_since >= ic.selected_hold_s:
             self._set_state(State.ACTIVE, now, "selection hold elapsed")
@@ -248,6 +256,7 @@ class Engine:
         if force or name != self.setup_name or setup != self.targets.setup:
             self.setup_name = name
             self.targets.set_setup(setup)
+            self._sent_target, self._target_pending = None, False
             log.info("selection setup %s: %s", name, setup.describe())
             self.out.send(f"{self.p}/target", "none", "none")
             self._event("setup", name)
@@ -259,17 +268,18 @@ class Engine:
         if new == self.state:
             return
         log.info("state %s -> %s (%s)", self.state.value, new.value, reason)
+        if new not in _CLEARS_TARGET:
+            self._flush_target()  # the target as it stands goes out before the new state
         self.state = new
         self.state_since = now
         self.fusion.learn_idle_bias = new == State.IDLE
         if new == State.CALIBRATING:
             self.calibrator.reset()
             self._calibration_slow_sent = False
-        if new in (State.CALIBRATING, State.IDLE, State.DISCONNECTED):
+        if new in _CLEARS_TARGET:
             self._clear_target()
         if new == State.RESETTING:
             self._reset_still_since = None
-            self._clear_target()
         if new == State.ACTIVE:
             self._idle_still_since = None
             self._idle_tilt_since = None
@@ -330,6 +340,7 @@ class Engine:
         self.fusion.reanchor_yaw(centre, self.cfg.interaction.reanchor_gain)
         self._yaw_corrected += abs(self.fusion.yaw_deg - before)
         log.info("selected %s", target)
+        self._flush_target()
         self.out.send(f"{self.p}/selected", target.column, target.row)
         self._event("selected", target.column, target.row)
         self._set_state(State.SELECTED, t, f"nod on {target}")
@@ -366,17 +377,25 @@ class Engine:
         the active selection setup, yaw ranges, centres and pitch, degrees."""
         self.out.send(f"{self.p}/setup", *self.targets.setup.osc_args())
 
+    def _flush_target(self) -> None:
+        """Send /target if it changed since the last one sent."""
+        if self._target_pending:
+            self._target_pending = False
+            if self.targets.current != self._sent_target:
+                self._emit_target()
+
     def _emit_target(self) -> None:
         t = self.targets.current
+        self._sent_target, self._target_pending = t, False
         if t is None:
             self.out.send(f"{self.p}/target", "none", "none")
         else:
             self.out.send(f"{self.p}/target", t.column, t.row)
 
     def _clear_target(self) -> None:
-        had = self.targets.current is not None
         self.targets.reset()
-        if had:
+        self._target_pending = False
+        if self._sent_target is not None:
             self._emit_target()
 
     def _emit_continuous(self, now: float) -> None:
