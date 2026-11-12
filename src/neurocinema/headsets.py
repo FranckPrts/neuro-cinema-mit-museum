@@ -40,6 +40,8 @@ log = logging.getLogger(__name__)
 
 BATTERY_WINDOW_S = 20 * 60.0  # drain-rate estimate uses the last 20 minutes...
 BATTERY_MIN_SPAN_S = 5 * 60.0  # ...once it covers at least 5
+TRACE_SPAN_S = 2 * 3600.0  # the status page's battery graph shows the last 2 hours...
+TRACE_STEP_S = 60.0  # ...one point a minute
 
 
 class Phase(StrEnum):
@@ -65,12 +67,24 @@ class Headset:
     battery: float | None = None
     battery_at: float | None = None
     history: deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=400))
+    trace: deque[tuple[float, float]] = field(default_factory=deque)  # (t, percent) for the graph
 
     def record_battery(self, percent: float, t: float) -> None:
         self.battery, self.battery_at = percent, t
         self.history.append((t, percent))
         while self.history and self.history[0][0] < t - BATTERY_WINDOW_S:
             self.history.popleft()
+        if not self.trace or t - self.trace[-1][0] >= TRACE_STEP_S:
+            self.trace.append((t, percent))
+        while self.trace and self.trace[0][0] < t - TRACE_SPAN_S:
+            self.trace.popleft()
+
+    def trace_points(self, now: float) -> list[list[float]]:
+        """[[seconds ago, percent], ...] oldest first, ending at the latest reading."""
+        points = [(t, p) for t, p in self.trace if now - t <= TRACE_SPAN_S]
+        if self.battery_at is not None and (not points or points[-1][0] < self.battery_at):
+            points.append((self.battery_at, self.battery))
+        return [[round(now - t), round(p, 1)] for t, p in points]
 
     def minutes_left(self) -> float | None:
         """Linear fit of recent battery readings; None until there is enough."""
@@ -342,6 +356,7 @@ class HeadsetManager:
                 "battery": None if h.battery is None else round(h.battery),
                 "battery_s_ago": None if h.battery_at is None else round(now - h.battery_at),
                 "minutes_left": None if h.minutes_left() is None else round(h.minutes_left()),
+                "battery_trace": h.trace_points(now),
             })
         snap = {
             "alert": alert.value,
@@ -354,6 +369,7 @@ class HeadsetManager:
             "receiving": self.connected(),
             "rate_hz": round(self.rate_hz(), 1),
             "headsets": headsets,
+            "swap_soon_percent": self.cfg.swap_soon_percent,
             "unknown": sorted(n for n, t in self.unknown.items() if now - t <= 5 * self.cfg.scan_interval_s),
         }
         with self._snapshot_lock:

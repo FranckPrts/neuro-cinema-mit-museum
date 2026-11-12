@@ -248,3 +248,19 @@ def test_app_sends_headset_status_only_for_the_headset_manager():
     App(Config(), SimSource(VirtualHead(seed=1)), out)._emit_status(0.0)
     assert any(address == "/nc/status" for address, _ in out.sent)
     assert not any(address == "/nc/headset" for address, _ in out.sent)
+
+
+def test_battery_trace_covers_two_hours_one_point_a_minute():
+    h = Harness(batteries={"Muse-AAAA": 90.0, "Muse-BBBB": 80.0})
+    h.driver.drain_per_min = 0.25
+    h.use("A")
+    h.run(150 * 60.0, dt=1.0)
+    snap = h.snap
+    a = next(x for x in snap["headsets"] if x["label"] == "A")
+    trace = a["battery_trace"]
+    assert snap["swap_soon_percent"] == 20.0
+    assert trace[0][0] <= 2 * 3600 and trace[0][0] >= 2 * 3600 - 60  # oldest kept is ~2 h ago
+    assert len(trace) <= 2 * 60 + 2
+    assert trace[-1] == [a["battery_s_ago"], pytest.approx(a["battery"], abs=0.5)]
+    assert all(later[0] < earlier[0] for earlier, later in zip(trace, trace[1:]))
+    assert trace[0][1] > trace[-1][1]  # it drained

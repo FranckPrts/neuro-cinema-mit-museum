@@ -45,6 +45,10 @@
             background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok);
             font-weight: 700; font-size: 14px; }
   .hs .on::before { content: "\25CF  "; }
+  /* Battery over the last 2 hours: full width = 2 h, height = 0-100 %. Right edge is now. */
+  .hs .spark { margin: -4px 0 10px; }
+  .hs .spark svg { display: block; width: 100%; height: 44px; overflow: visible; }
+  .hs .spark .axis { display: flex; justify-content: space-between; color: var(--quiet); font-size: 11px; margin-top: 2px; }
   button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
            color: var(--ink); padding: 10px 14px; cursor: pointer; width: 100%; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
@@ -218,6 +222,45 @@ function renderEngine(e) {
   }
 }
 
+const SPARK_S = 2 * 3600, SVG = "http://www.w3.org/2000/svg";
+
+function sparkline(trace, swapAt) {
+  const W = 100, H = 40;
+  const x = (ago) => (Math.max(0, SPARK_S - ago) / SPARK_S) * W;
+  const y = (pct) => H - (Math.min(100, Math.max(0, pct)) / 100) * H;
+  const pts = trace.map(([ago, pct]) => `${x(ago).toFixed(2)},${y(pct).toFixed(2)}`);
+  const last = trace[trace.length - 1][1];
+  const color = last < swapAt ? "var(--warn)" : "var(--ok)";
+  const el = (tag, attrs) => {
+    const n = document.createElementNS(SVG, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    return n;
+  };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img",
+                          "aria-label": `Battery over the last 2 hours, now ${Math.round(last)} %` });
+  const thin = { "vector-effect": "non-scaling-stroke", fill: "none" };
+  svg.append(
+    el("line", { ...thin, x1: 0, x2: W, y1: H, y2: H, stroke: "var(--line)", "stroke-width": 1 }),
+    el("line", { ...thin, x1: 0, x2: W, y1: y(swapAt), y2: y(swapAt), stroke: "var(--warn)",
+                 "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0.6 }),
+    el("polygon", { points: `${pts[0].split(",")[0]},${H} ${pts.join(" ")} ${pts.at(-1).split(",")[0]},${H}`,
+                    fill: color, opacity: 0.12, stroke: "none" }),
+    el("polyline", { ...thin, points: pts.join(" "), stroke: color, "stroke-width": 2,
+                     "stroke-linejoin": "round", "stroke-linecap": "round" }),
+    // A zero-length line with a round cap draws a round dot even though the SVG is stretched.
+    el("line", { ...thin, x1: x(trace.at(-1)[0]), x2: x(trace.at(-1)[0]), y1: y(last), y2: y(last),
+                 stroke: color, "stroke-width": 7, "stroke-linecap": "round" }),
+  );
+  const box = document.createElement("div");
+  box.className = "spark";
+  box.title = `Battery, last 2 hours. Dashed line: swap below ${swapAt} %.`;
+  const axis = document.createElement("div");
+  axis.className = "axis";
+  axis.innerHTML = "<span>2 h ago</span><span>now</span>";
+  box.append(svg, axis);
+  return box;
+}
+
 function render(s) {
   managed = s.managed !== false;
   $("hs-section").style.display = managed ? "" : "none";
@@ -256,6 +299,7 @@ function render(s) {
       if (meta.length) metaEl.append(document.createElement("br"));
       metaEl.append(on);
     }
+    if (h.in_use && h.battery_trace.length >= 2) card.appendChild(sparkline(h.battery_trace, s.swap_soon_percent));
     const b = document.createElement("button");
     b.textContent = h.chosen ? (h.in_use ? "In use" : "Waiting…") : "Use this headset";
     b.className = h.chosen ? "" : "primary";
