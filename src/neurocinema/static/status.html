@@ -41,6 +41,10 @@
   /* Letter and printed number share one style; both shrink on narrow (phone) cards instead of wrapping. */
   .hs .label, .hs .code { font-size: min(34px, 21cqi); font-weight: 700; line-height: 1; white-space: nowrap; }
   .hs .meta { color: var(--quiet); font-size: 14px; margin: 6px 0 10px; min-height: 40px; }
+  .hs .on { display: inline-block; margin-top: 6px; padding: 3px 10px; border-radius: 999px;
+            background: var(--ok-bg); color: var(--ok); border: 1px solid var(--ok);
+            font-weight: 700; font-size: 14px; }
+  .hs .on::before { content: "\25CF  "; }
   button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--card);
            color: var(--ink); padding: 10px 14px; cursor: pointer; width: 100%; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
@@ -234,13 +238,24 @@ function render(s) {
     else if (h.chosen) meta.push("Chosen");
     if (h.battery !== null) meta.push(`${h.battery} %` + (h.in_use ? "" : ` (${ago(h.battery_s_ago)})`));
     if (h.minutes_left !== null && h.in_use) meta.push(`about ${h.minutes_left} min left`);
-    if (!h.chosen && h.seen_s_ago !== null) meta.push(h.seen_s_ago < 30 ? "switched on" : `seen ${ago(h.seen_s_ago)}`);
+    if (!h.chosen && h.seen_s_ago !== null) {
+      if (h.seen_s_ago >= 30) meta.push(`seen ${ago(h.seen_s_ago)}`);
+    }
+    const switchedOn = !h.chosen && h.seen_s_ago !== null && h.seen_s_ago < 30;
     card.innerHTML = `<div class="top"><div class="label"></div><div class="code"></div></div><div class="meta"></div>`;
     card.querySelector(".label").textContent = h.label;
     // The number printed on the headset: the end of its Bluetooth name (Muse-1E58 -> 1E58).
     card.querySelector(".code").textContent = "#" + hwCode(h.name);
     card.querySelector(".code").title = h.name;
-    card.querySelector(".meta").textContent = meta.join(" · ") || "Not seen yet";
+    const metaEl = card.querySelector(".meta");
+    metaEl.textContent = meta.join(" · ") || (switchedOn ? "" : "Not seen yet");
+    if (switchedOn) {
+      const on = document.createElement("span");
+      on.className = "on";
+      on.textContent = "Switched on";
+      if (meta.length) metaEl.append(document.createElement("br"));
+      metaEl.append(on);
+    }
     const b = document.createElement("button");
     b.textContent = h.chosen ? (h.in_use ? "In use" : "Waiting…") : "Use this headset";
     b.className = h.chosen ? "" : "primary";

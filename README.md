@@ -12,10 +12,16 @@ Muse 2 ──BLE──► muselsl (child process, supervised)
                    │ LSL: ACC + GYRO, 52 Hz
                    ▼
                nc-engine ── fusion ─ gestures ─ targets ─ state machine
-                   │  ▲
+                   │  ▲  ▲
+                   │  │  └── OSC :7004 /nc/cam/* ── camera bench (optional, bench/camera)
          OSC :7000 ▼  │ OSC :7001
                 TouchDesigner
 ```
+
+nc-engine is the hub: TouchDesigner only talks to it. The headset's messages
+are `/nc/...`; the camera bench's are re-published as `/nc/cam/...`. The
+contract for TouchDesigner is the OSC reference below (and
+`docs/osc-contract.csv` locally).
 
 EEG is not used yet (Layer C will add live EEG on a separate `/nc/eeg/...`
 namespace; nothing is ever recorded).
@@ -58,6 +64,14 @@ This launches `muselsl stream` itself, finds the LSL streams and restarts
 everything as needed. Use `--unmanaged` if something else (BlueMuse, a manual
 `muselsl stream --acc --gyro --lsltime`) already publishes the streams.
 
+**Camera only** (no headset; the engine just relays the camera):
+
+```bash
+nc-engine --no-headset
+```
+
+`--no-camera` turns the camera input off.
+
 **See what is sent**, without TouchDesigner:
 
 ```bash
@@ -76,18 +90,24 @@ and run `nc-monitor --port 7002`.
 
 ## Everything together: engine, camera, viewer
 
-One OSC port can be received by one program, but any number can send to it.
-So the engine and the camera bench both send to the viewer:
+The camera bench sends to the engine, and the engine sends everything on:
 
 ```bash
-nc-engine                                                  # IMU -> /nc/... on 7000
-python bench/camera/camera_bench.py --osc 127.0.0.1:7000   # camera -> /nc/cam/... on 7000
+nc-engine                                                  # headset -> /nc/..., camera -> /nc/cam/..., on 7000
+python bench/camera/camera_bench.py --osc 127.0.0.1:7004   # camera -> engine (camera.listen_port)
 python viewer/nc_viewer.py                                 # receives both, http://127.0.0.1:8080
 ```
 
-To keep TouchDesigner (or `nc-monitor`) on 7000, send the engine to a second
-port too (`[osc] destinations = ["127.0.0.1:7000", "127.0.0.1:7003"]`), send
-the camera to 7003, and run `python viewer/nc_viewer.py --osc-port 7003`.
+One OSC port can be received by one program, but any number can send to it.
+To keep TouchDesigner on 7000, send the engine to more ports
+(`[osc] destinations = ["127.0.0.1:7000", "127.0.0.1:7002", "127.0.0.1:7003"]`
+in `config/local.toml`) and run `nc-monitor --port 7002` and
+`python viewer/nc_viewer.py --osc-port 7003`.
+
+In VS Code, "Tasks: Run Task" has these ready: each `Try: ...` task (headset,
+camera, sim, alone or together, with the viewer and monitor) first runs
+`scripts/nc-cleanup.sh`, which stops whatever this repo left running and shows
+who still holds the ports.
 
 In the viewer: white = IMU, gold = camera; the calibration card (top right)
 shows what each one was set up with; `r` runs the room check (each backend's
@@ -242,6 +262,18 @@ Engine → TouchDesigner (default `127.0.0.1:7000`):
 | `/nc/calib/room` | from_room (0/1), room_hash (string), left, middle, right screen centre yaws, then column bounds lo, left\|middle, middle\|right, hi (degrees) | same |
 | `/nc/setup` | name, then yaw ranges left lo hi, middle lo hi, right lo hi, then column centres left middle right, split_pitch, max_pitch (degrees) | on a switch, every second, and with `/nc/calib/*` |
 
+Camera, re-published by the engine on the same port (only while the camera bench sends to `camera.listen_port`, default 7004):
+
+| Address | Arguments | When |
+|---|---|---|
+| `/nc/cam/state` | `idle` `active` `selected` (`idle` when the camera is lost; `selected` is sent as `active` while watching) | on change, and every second |
+| `/nc/cam/target` | column, row, as `/nc/target` | on change, and every second |
+| `/nc/cam/selected` | column, row | when a dwell selects (not while watching) |
+| `/nc/cam/dwell` | 0.0 to 1.0 | every camera frame while a target is highlighted |
+| `/nc/cam/pose` | yaw, pitch, roll (degrees, roll = 0) | every camera frame while someone is aiming |
+| `/nc/cam/event` | name [args] | `camera_connected`, `camera_lost` (nothing for `camera.stale_after_s`, 3 s), `selected <col> <row>`, `selected_ignored watching` |
+| `/nc/cam/calib` | x y z, aim x y z (room frame, m), bearing, tilt (deg), eye_height (m), split, pitch_offset | on change, and every 5 s (for the viewer) |
+
 TouchDesigner → engine (default `127.0.0.1:7001`):
 
 | Address | Effect |
@@ -252,7 +284,7 @@ TouchDesigner → engine (default `127.0.0.1:7001`):
 | `/nc/cmd/phase` `choosing\|watching` | allow or block selections |
 | `/nc/cmd/restart_stream` | restart muselsl (not counted as a failure) |
 | `/nc/cmd/ping` [args] | replies `/nc/pong` [args] |
-| `/nc/cmd/snapshot` | re-send state, phase and target now |
+| `/nc/cmd/snapshot` | re-send state, phase and target now (and the camera's state and target) |
 | `/nc/cmd/setup` [name] | switch selection setup (sends `/nc/target none none`, then re-classifies; yaw and calibration are kept). Unknown name: a warning, no change. No name: re-read `config/selection_setups.toml` and re-apply the active setup |
 
 TouchDesigner tips: string messages (`/state`, `/target`, `/event`) need an

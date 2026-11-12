@@ -92,7 +92,7 @@ bottom half.
 | `--pitch-offset 4.5` | Degrees added to the arm's pitch (what `c` prints). |
 | `--select head` | Head direction drives the selection instead of the arm. |
 | `--dwell 1.5` `--hold 0.25` `--smooth 0.15` | Seconds to select, seconds before a new screen lights up, aim smoothing. |
-| `--osc 127.0.0.1:7003` | Sends the engine's messages under `/nc/cam/`: `pose`, `target <col> <row>`, `selected`, `dwell`, `state`, `event`, `heartbeat`, same arguments as nc-engine's (see `osc_out.py`). The older `/nc/cam/aim`, `/nc/cam/highlight` and `/nc/cam/select` are still sent for now. Off by default; the prefix keeps it apart from the engine's `/nc/...`. |
+| `--osc 127.0.0.1:7004` | Sends `/nc/cam/`: `pose`, `target <col> <row>`, `selected`, `dwell`, `state`, `event`, `calib`, `heartbeat`, same arguments as nc-engine's (see `osc_out.py`), to nc-engine's camera port (`camera.listen_port`, 7004). The engine re-publishes them to TouchDesigner and the viewer, blocks selections while watching, and reports `camera_connected` / `camera_lost`. The older `/nc/cam/aim`, `/nc/cam/highlight` and `/nc/cam/select` are still sent but the engine drops them. Off by default. |
 | `--log logs/cam.csv` | One CSV row per frame (aim, degrees from the divider, highlight, events), to compare runs. |
 | `--camera 1` or `--camera clip.mp4` | Another camera, or replay a video. |
 | `--model lite|full|heavy` | Speed against accuracy. `full` is the default. |

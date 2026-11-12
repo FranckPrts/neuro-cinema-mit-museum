@@ -6,7 +6,7 @@
 # Units: degrees, degrees per second (dps), seconds (s), g.
 
 [source]
-kind = "muse"                 # "muse" (headset via LSL), "sim" (virtual head) or "muse_direct" (in-process, battery + headset swaps)
+kind = "muse"                 # "muse" (headset via LSL), "sim" (virtual head), "muse_direct" (in-process, battery + headset swaps) or "none" (camera only)
 
 [muse]
 manage_stream = true          # launch and supervise `muselsl stream` ourselves
@@ -141,6 +141,14 @@ listen_port = 7001
 pose_rate_hz = 30.0
 status_rate_hz = 2.0
 snapshot_rate_hz = 1.0
+
+[camera]
+# The camera bench sends /nc/cam/* here (camera_bench.py --osc 127.0.0.1:7004);
+# the engine re-publishes them to osc.destinations, so TouchDesigner only talks to the engine.
+enabled = true
+listen_host = "127.0.0.1"
+listen_port = 7004            # 7002 = nc-monitor, 7003 = viewer
+stale_after_s = 3.0           # nothing from the camera this long = /nc/cam/event camera_lost
 
 [logging]
 level = "INFO"

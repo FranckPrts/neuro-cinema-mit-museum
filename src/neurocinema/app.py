@@ -1,4 +1,4 @@
-"""The main loop: source -> engine -> OSC, plus status, commands and supervision."""
+"""The main loop: source -> engine -> OSC, plus the camera relay, status, commands and supervision."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from .camera import CameraRelay
 from .config import Config
 from .engine import Engine, Output
 from .osc import OscCommandServer
@@ -64,12 +65,14 @@ class App:
         supervisor: MuseStreamSupervisor | None = None,
         hooks: list[Callable[[float], None]] | None = None,
         setups: dict[str, SelectionSetup] | None = None,
+        camera: CameraRelay | None = None,
     ):
         self.cfg = cfg
         self.source = source
         self.out = out
         self.commands = commands
         self.supervisor = supervisor
+        self.camera = camera
         self.hooks = hooks or []
         self.engine = Engine(cfg, out, setups)
         self.page = PageLink()
@@ -112,6 +115,8 @@ class App:
         for name in page_commands:
             log.info("status page: %s", name)
             self.handle_command(name, (), now)
+        if self.camera:
+            self.camera.poll(self.engine.phase.value)
         for hook in self.hooks:
             hook(now)
         self.engine.tick(now)
@@ -128,6 +133,8 @@ class App:
                 self.source.reset()
         else:
             self.engine.command(name, args, now)
+            if name == "snapshot" and self.camera:
+                self.camera.snapshot()
 
     def _emit_status(self, now: float) -> None:
         mono = time.monotonic()
@@ -185,5 +192,7 @@ class App:
             self.supervisor.stop()
         if self.commands:
             self.commands.close()
+        if self.camera:
+            self.camera.close()
         self.source.close()
         self.out.send(f"{self.p}/event", "engine_stopped")

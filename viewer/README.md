@@ -33,7 +33,7 @@ from (orange when it came from the 2 s worn mean instead of the stand), time
 since calibration, the yaw corrected since then (re-anchoring plus shake
 resets; orange above 12°, red above 30° = drift), and gyro samples at full
 scale. The dashed grey line is the calibration gaze (yaw 0, pitch 0). When the
-camera bench sends to the same port (`camera_bench.py --osc 127.0.0.1:7000`),
+camera bench sends to the engine (`camera_bench.py --osc 127.0.0.1:7004`),
 the camera appears as a gold cone at its `camera.toml` position, aimed at its
 aim point, with its bearing, tilt, eye height and divider in the card. With both streams, the camera's gaze is a gold arrow next to the IMU's white
 one, and its target is hatched in gold (a whole column in head mode). The

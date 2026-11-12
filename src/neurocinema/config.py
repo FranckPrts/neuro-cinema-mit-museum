@@ -23,7 +23,8 @@ class ConfigError(ValueError):
 @dataclass
 class SourceConfig:
     # "muse" reads the headset through LSL; "sim" runs a virtual head (no hardware);
-    # "muse_direct" connects to the headset in-process (battery, staff headset swaps).
+    # "muse_direct" connects to the headset in-process (battery, staff headset swaps);
+    # "none" runs without a headset (the engine only relays the camera).
     kind: str = "muse"
 
 
@@ -96,6 +97,17 @@ class HeadsetsConfig:
         if len(set(labels)) != len(labels) or len(set(names)) != len(names):
             raise ConfigError("headsets.registry: labels and names must be unique")
         return out
+
+
+@dataclass
+class CameraConfig:
+    # The camera bench (bench/camera, --osc host:port) sends its /nc/cam/*
+    # here; the engine re-publishes them on osc.destinations, so TouchDesigner
+    # only talks to the engine.
+    enabled: bool = True
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 7004
+    stale_after_s: float = 3.0  # nothing from the camera this long = camera_lost
 
 
 @dataclass
@@ -299,12 +311,13 @@ class Config:
     gestures: GesturesConfig = field(default_factory=GesturesConfig)
     interaction: InteractionConfig = field(default_factory=InteractionConfig)
     osc: OscConfig = field(default_factory=OscConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def validate(self) -> None:
-        if self.source.kind not in ("muse", "sim", "muse_direct"):
+        if self.source.kind not in ("muse", "sim", "muse_direct", "none"):
             raise ConfigError(
-                f"source.kind must be 'muse', 'sim' or 'muse_direct', got {self.source.kind!r}")
+                f"source.kind must be 'muse', 'sim', 'muse_direct' or 'none', got {self.source.kind!r}")
         self.headsets.entries()
         if self.headsets.connect_attempts < 1:
             raise ConfigError("headsets.connect_attempts must be at least 1")
@@ -332,6 +345,9 @@ class Config:
                 raise ConfigError(f"gestures.{name}.min_lobes must be at least 2")
             if g.first_sign not in (-1, 0, 1):
                 raise ConfigError(f"gestures.{name}.first_sign must be -1, 0 or 1")
+        if self.camera.enabled and self.camera.listen_port in (
+                self.osc.listen_port, *(parse_host_port(d)[1] for d in self.osc.destinations)):
+            raise ConfigError(f"camera.listen_port {self.camera.listen_port} is already used by [osc]")
         if not self.osc.prefix.startswith("/"):
             raise ConfigError("osc.prefix must start with '/'")
 

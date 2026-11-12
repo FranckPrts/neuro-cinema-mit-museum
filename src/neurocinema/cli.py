@@ -73,6 +73,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("-c", "--config", type=Path, action="append",
                    help=f"TOML config file (repeatable; default {DEFAULT_CONFIG} then {LOCAL_CONFIG} if present)")
     p.add_argument("--sim", action="store_true", help="use the virtual head instead of the headset")
+    p.add_argument("--no-headset", action="store_true",
+                   help="run without a headset (source.kind = none): only relay the camera")
+    p.add_argument("--no-camera", action="store_true", help="do not listen for the camera bench")
     p.add_argument("--no-keyboard", action="store_true", help="simulator without keyboard control")
     p.add_argument("--unmanaged", action="store_true",
                    help="do not launch muselsl; read LSL streams published by something else")
@@ -99,6 +102,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.sim:
         cfg.source.kind = "sim"
+    if args.no_headset:
+        cfg.source.kind = "none"
+    if args.no_camera:
+        cfg.camera.enabled = False
     if args.unmanaged:
         cfg.muse.manage_stream = False
     if args.sim_headsets:
@@ -116,8 +123,24 @@ def main(argv: list[str] | None = None) -> int:
                   cfg.osc.listen_host, cfg.osc.listen_port, e)
         return 3
 
+    camera = None
+    if cfg.camera.enabled:
+        from .camera import CameraRelay
+
+        camera = CameraRelay(out, cfg.osc.prefix, cfg.camera.stale_after_s)
+        try:
+            camera.listen(cfg.camera.listen_host, cfg.camera.listen_port)
+        except OSError as e:
+            log.warning("cannot listen for the camera on %s:%d (%s); running without it",
+                        cfg.camera.listen_host, cfg.camera.listen_port, e)
+            camera = None
+
     closers = []
-    if cfg.source.kind == "sim":
+    if cfg.source.kind == "none":
+        from .sources.none import NoSource
+
+        source = NoSource()
+    elif cfg.source.kind == "sim":
         from .sources.sim import SimSource
 
         source = SimSource()
@@ -133,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
             return 4
         source = LslImuSource(cfg.muse)
 
-    app = App(cfg, source, out, commands=commands, setups=setups)
+    app = App(cfg, source, out, commands=commands, setups=setups, camera=camera)
 
     if cfg.status_page.enabled:
         from .statuspage import StatusPage

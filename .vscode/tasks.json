@@ -1,7 +1,16 @@
 {
   // Run with Cmd+Shift+P > "Tasks: Run Task". Stop with "Tasks: Terminate Task" or Ctrl+C in a panel.
+  //
+  // nc-engine is the hub: the headset and the camera bench both feed it, and it is the
+  // only thing TouchDesigner talks to (docs/osc-contract.csv):
+  //   headset ---------------------\
+  //   camera bench -> :7004 ------> nc-engine -> /nc/... and /nc/cam/... -> :7000 TouchDesigner
+  //                                           <- /nc/cmd/...             <- :7001
   // The engine fans out OSC to 7000 (TouchDesigner), 7002 (nc-monitor) and 7003 (viewer):
   // see [osc] destinations in config/local.toml.
+  //
+  // "Try: ..." tasks first run "Cleanup" (stops whatever this repo left running, frees the
+  // ports), then start their parts side by side. Components can also be started one by one.
   "version": "2.0.0",
   "options": {
     "env": { "PATH": "${workspaceFolder}/.venv/bin:${env:PATH}" }
@@ -27,6 +36,21 @@
       "label": "Engine: sim (keyboard)",
       "type": "shell",
       "command": "nc-engine --sim",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Engine: no headset (camera only)",
+      "type": "shell",
+      "command": "nc-engine --no-headset",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Camera bench (-> engine :7004)",
+      "type": "shell",
+      // Needs `pip install -r bench/camera/requirements.txt` and camera access for VS Code.
+      "command": "python bench/camera/camera_bench.py --osc 127.0.0.1:7004",
       "isBackground": true,
       "problemMatcher": []
     },
@@ -59,18 +83,6 @@
       "isBackground": true,
       "problemMatcher": []
     },
-
-    // ---- Combinations ----
-    {
-      "label": "Headset + Monitor + Viewer",
-      "dependsOn": ["Engine: headset", "Monitor", "Viewer (three.js)"],
-      "problemMatcher": []
-    },
-    {
-      "label": "Headset + Monitor",
-      "dependsOn": ["Engine: headset", "Monitor"],
-      "problemMatcher": []
-    },
     {
       "label": "Muse: list devices",
       "type": "shell",
@@ -78,13 +90,84 @@
       "problemMatcher": []
     },
     {
-      "label": "Muse: quick scan (stream + view, no engine)",
-      "dependsOn": ["Muse: stream (EEG + ACC + GYRO)", "Muse: view EEG"],
+      "label": "Cleanup: stop everything (engine, camera, viewer, monitor, muselsl)",
+      "type": "shell",
+      "command": "bash scripts/nc-cleanup.sh",
+      "presentation": { "panel": "shared", "reveal": "silent" },
+      "problemMatcher": []
+    },
+
+    // ---- Ready to try: cleanup first, then the parts together ----
+    {
+      "label": "Try: headset + camera + viewer + monitor",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Cleanup: stop everything (engine, camera, viewer, monitor, muselsl)", "start: headset + camera"],
       "problemMatcher": []
     },
     {
+      "label": "Try: headset + viewer + monitor",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Cleanup: stop everything (engine, camera, viewer, monitor, muselsl)", "start: headset"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Try: camera + viewer + monitor (no headset)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Cleanup: stop everything (engine, camera, viewer, monitor, muselsl)", "start: camera"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Try: sim + camera + viewer + monitor",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Cleanup: stop everything (engine, camera, viewer, monitor, muselsl)", "start: sim + camera"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Try: sim + viewer + monitor",
+      "dependsOrder": "sequence",
+      "dependsOn": ["Cleanup: stop everything (engine, camera, viewer, monitor, muselsl)", "start: sim"],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: headset + camera",
+      "hide": true,
+      "dependsOn": ["Engine: headset", "Camera bench (-> engine :7004)", "Monitor", "Viewer (three.js)"],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: headset",
+      "hide": true,
+      "dependsOn": ["Engine: headset", "Monitor", "Viewer (three.js)"],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: camera",
+      "hide": true,
+      "dependsOn": ["Engine: no headset (camera only)", "Camera bench (-> engine :7004)", "Monitor", "Viewer (three.js)"],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: sim + camera",
+      "hide": true,
+      "dependsOn": ["Engine: sim (keyboard)", "Camera bench (-> engine :7004)", "Monitor", "Viewer (three.js)"],
+      "problemMatcher": []
+    },
+    {
+      "label": "start: sim",
+      "hide": true,
+      "dependsOn": ["Engine: sim (keyboard)", "Monitor", "Viewer (three.js)"],
+      "problemMatcher": []
+    },
+
+    // ---- Other combinations (no cleanup: they keep the muselsl you started) ----
+    {
       "label": "Unmanaged engine + Monitor",
       "dependsOn": ["Engine: unmanaged (muselsl/BlueMuse started by you)", "Monitor"],
+      "problemMatcher": []
+    },
+    {
+      "label": "Muse: quick scan (stream + view, no engine)",
+      "dependsOn": ["Muse: stream (EEG + ACC + GYRO)", "Muse: view EEG"],
       "problemMatcher": []
     },
     {
